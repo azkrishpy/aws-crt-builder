@@ -13,11 +13,29 @@
 # fragment.
 
 import os
+import re
 import sys
 
 
 def _env(name, default=''):
     return os.environ.get(name, default)
+
+
+def _fenced_code_block(text):
+    """Wrap text in a Markdown fenced code block that text can't break out of.
+
+    abidiff's output embeds symbol/type names taken directly from the PR's
+    own source -- fully attacker-controlled. A symbol literally named with a
+    run of backticks (e.g. "```<script>...") would otherwise close our fence
+    early and let the rest render as raw Markdown/HTML instead of literal
+    text. Per the CommonMark fenced-code-block spec, a fence of N backticks
+    can only be closed by a line with >= N backticks, so using a fence one
+    character longer than the longest backtick run already in the text makes
+    it impossible for the content to escape.
+    """
+    longest_run = max((len(m) for m in re.findall(r'`+', text)), default=0)
+    fence = '`' * max(3, longest_run + 1)
+    return '{fence}\n{text}\n{fence}'.format(fence=fence, text=text)
 
 
 def _verdict_note(rc):
@@ -73,8 +91,8 @@ def main():
         out.write('\n'.join(lines) + '\n')
         if diff_text:
             out.write('\n<details><summary>abidiff output</summary>\n\n')
-            out.write('```\n{}\n```\n'.format(diff_text.strip()))
-            out.write('\n</details>\n')
+            out.write(_fenced_code_block(diff_text.strip()))
+            out.write('\n\n</details>\n')
 
     return 0
 
