@@ -1,12 +1,15 @@
 # Example PR check — copy into consumer repo's .github/workflows/
-# Fails PR CI if a valid changelog fragment is missing for the PR.
-# Skips when `skip-changelog` label is applied OR when the PR touches only
-# infra-only paths.
+# Fails PR CI if the PR title lacks a `<type>:` prefix, or if a valid
+# changelog fragment is missing.
+# The title check always runs. The fragment requirement is waived when the
+# PR touches only infra paths; the whole job is skipped by `skip-changelog`.
 
 name: Changelog Check
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # `edited` matters: it is what fires when someone retitles the PR, so a
+    # title fix re-runs this check instead of leaving a stale red X.
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   changelog-check:
@@ -34,9 +37,13 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Assert fragment present
-        if: steps.infra.outputs.skip != 'true'
+      # Runs unconditionally so the PR title is validated even on infra-only
+      # PRs -- the title lands in git history either way. The infra-only
+      # detection waives only the fragment requirement.
+      - name: Assert PR title convention and fragment
         uses: awslabs/aws-crt-builder/.github/actions/changelog@main
         with:
           mode: check
           pr: ${{ github.event.pull_request.number }}
+          title: ${{ github.event.pull_request.title }}
+          require-fragment: ${{ steps.infra.outputs.skip != 'true' }}

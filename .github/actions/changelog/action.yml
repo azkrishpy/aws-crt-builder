@@ -17,6 +17,13 @@ inputs:
   pr:
     description: 'PR number (check mode).'
     required: false
+  title:
+    description: 'PR title (check mode). Validated against the `<type>: summary` convention.'
+    required: false
+  require-fragment:
+    description: 'check mode: set false to validate only the title (infra-only PRs).'
+    required: false
+    default: 'true'
   # revert
   original-pr:
     description: 'Original PR number being reverted (revert mode).'
@@ -43,6 +50,8 @@ runs:
         CHANGES_DIR: ${{ inputs.changes-dir }}
         CHANGELOG: ${{ inputs.changelog }}
         PR: ${{ inputs.pr }}
+        TITLE: ${{ inputs.title }}
+        REQUIRE_FRAGMENT: ${{ inputs.require-fragment }}
         ORIGINAL_PR: ${{ inputs.original-pr }}
         REVERT_PR: ${{ inputs.revert-pr }}
         URL: ${{ inputs.url }}
@@ -52,7 +61,13 @@ runs:
         SCRIPT="${GITHUB_ACTION_PATH}/scripts/changelog.py"
         case "${MODE}" in
           check)
-            python3 "${SCRIPT}" check --pr "${PR}" --changes-dir "${CHANGES_DIR}"
+            # TITLE comes in as an env var, never interpolated into this script,
+            # so a crafted PR title cannot inject shell.
+            EXTRA=()
+            if [[ -n "${TITLE}" ]]; then EXTRA+=(--title "${TITLE}"); fi
+            if [[ "${REQUIRE_FRAGMENT}" == "false" ]]; then EXTRA+=(--no-fragment); fi
+            python3 "${SCRIPT}" check --pr "${PR}" \
+              --changes-dir "${CHANGES_DIR}" "${EXTRA[@]}"
             ;;
           validate)
             python3 "${SCRIPT}" validate "${CHANGES_DIR}/preview"

@@ -297,7 +297,38 @@ def cmd_validate(args):
     return 0
 
 
+def check_title(title):
+    """Return an error string if the PR title lacks a recognised type prefix."""
+    typ, _ = parse_title(title)
+    if typ is not None:
+        return None
+    return (
+        f"ERROR: PR title does not start with a recognised type.\n"
+        f"       got:      {title.strip()!r}\n"
+        f"       expected: '<type>: <customer-facing summary>'\n"
+        f"       type must be one of: {' | '.join(sorted(VALID_TYPES))}\n"
+        f"       an optional scope is allowed, e.g. 'fix(io): Handle EINTR.'\n"
+        f"       the type drives the changelog section the entry lands in."
+    )
+
+
 def cmd_check(args):
+    """Gate a PR: title convention always, fragment presence unless waived.
+
+    The title is checked even when the fragment requirement is waived
+    (infra-only PRs), because the title still lands in git history.
+    """
+    if args.title is not None:
+        err = check_title(args.title)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        print("OK: PR title follows the '<type>: summary' convention")
+
+    if not args.require_fragment:
+        print(f"OK: fragment not required for #{args.pr} (title-only check)")
+        return 0
+
     frag = Path(args.changes_dir) / "preview" / f"{args.pr}.json"
     if not frag.exists():
         print(
@@ -591,10 +622,16 @@ def main(argv=None):
     v.add_argument("target")
     v.set_defaults(func=cmd_validate)
 
-    c = sub.add_parser("check", help="CI: assert a valid fragment exists for a given PR")
+    c = sub.add_parser("check",
+                       help="CI: assert the PR title follows the type convention "
+                            "and a valid fragment exists")
     c.add_argument("--pr", type=int, required=True)
+    c.add_argument("--title", help="PR title; validated against the type prefix "
+                                   "convention. Omit to skip the title check.")
+    c.add_argument("--no-fragment", dest="require_fragment", action="store_false",
+                   help="Only check the title (infra-only PRs that need no fragment).")
     c.add_argument("--changes-dir", default=".changes")
-    c.set_defaults(func=cmd_check)
+    c.set_defaults(func=cmd_check, require_fragment=True)
 
     r = sub.add_parser("render", help="regenerate root CHANGELOG.md from preview/ + latest/")
     r.add_argument("--changes-dir", default=".changes")

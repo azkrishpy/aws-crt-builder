@@ -506,3 +506,88 @@ def test_frozen_snapshot_hides_chore_like_root(tmp_path):
     assert "#1" in frozen
     assert "#2" not in frozen
     assert "### Maintenance" not in frozen
+
+
+# ---------- PR title convention ----------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("title", [
+    "feat: Add SSO sign-in.",
+    "fix: Handle EINTR.",
+    "doc: Clarify retry defaults.",
+    "docs: Clarify retry defaults.",
+    "chore: Bump aws-lc.",
+    "revert: Undo #843.",
+    "fix(io): Handle EINTR in the pipe loop.",
+    "FEAT: Uppercase is tolerated.",
+])
+def test_check_title_accepts_valid_prefixes(title):
+    assert cl.check_title(title) is None
+
+
+@pytest.mark.parametrize("title", [
+    "Add SSO sign-in",
+    "wip: half done",
+    "feature: wrong word",
+    "fix Handle EINTR",
+    "fix:",
+    "",
+    "   ",
+    ": no type",
+])
+def test_check_title_rejects_bad_prefixes(title):
+    err = cl.check_title(title)
+    assert err is not None
+    assert "does not start with a recognised type" in err
+
+
+def test_check_fails_on_bad_title_even_with_valid_fragment(tmp_path):
+    _seed(tmp_path, 5, "fix: Something.")
+    rc = cl.main([
+        "check", "--pr", "5", "--title", "no prefix at all",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ])
+    assert rc == 1
+
+
+def test_check_passes_with_good_title_and_fragment(tmp_path):
+    _seed(tmp_path, 5, "fix: Something.")
+    rc = cl.main([
+        "check", "--pr", "5", "--title", "fix: Something.",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ])
+    assert rc == 0
+
+
+def test_check_title_only_skips_fragment_requirement(tmp_path):
+    """Infra-only PRs: title still enforced, fragment not required."""
+    (tmp_path / ".changes" / "preview").mkdir(parents=True)
+    assert cl.main([
+        "check", "--pr", "99", "--title", "chore: CI tweak.", "--no-fragment",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ]) == 0
+
+
+def test_check_title_still_enforced_when_fragment_waived(tmp_path):
+    (tmp_path / ".changes" / "preview").mkdir(parents=True)
+    assert cl.main([
+        "check", "--pr", "99", "--title", "nope", "--no-fragment",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ]) == 1
+
+
+def test_check_without_title_arg_skips_title_check(tmp_path):
+    """Backwards compatible: omitting --title checks the fragment only."""
+    _seed(tmp_path, 5, "fix: Something.")
+    assert cl.main([
+        "check", "--pr", "5",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ]) == 0
+
+
+def test_check_title_error_names_valid_types(tmp_path):
+    err = cl.check_title("nope")
+    for t in ("feat", "fix", "doc", "chore", "revert"):
+        assert t in err

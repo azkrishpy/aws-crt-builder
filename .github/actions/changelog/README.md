@@ -23,7 +23,7 @@ derived and always regenerated end-to-end from the fragments.
 
 | Mode              | Trigger                | What it does                                                                       |
 |-------------------|------------------------|------------------------------------------------------------------------------------|
-| `check`           | PR CI                  | Fail the PR if `.changes/preview/<PR>.json` is missing or invalid.                 |
+| `check`           | PR CI                  | Fail the PR if the title lacks a `<type>:` prefix, or the fragment is missing/invalid. |
 | `validate`        | ad-hoc                 | Validate every fragment under `.changes/preview/`.                                 |
 | `render`          | on `docs`, after merge | Regenerate `CHANGELOG.md` from `preview/` + `latest/`; `--no-preview` for `main`.   |
 | `rollup`          | on `main`, on release  | Patch: accrete into `latest/`. Minor/major: freeze `latest/` → `<M>.<N>.x/`.       |
@@ -134,14 +134,33 @@ allowed: the version bump proceeds on its own.
 
 ## PR conventions
 
-The seed helper reads Conventional-Commit-style PR titles:
+PR titles must be Conventional-Commit-style:
 
 ```
 <type>: <customer-facing summary>
   type ∈ { feat | fix | doc | chore | revert }
 ```
 
-Titles without a recognised prefix are treated as `chore`.
+An optional scope is allowed (`fix(io): Handle EINTR.`), and the type is
+matched case-insensitively. This is **enforced** — `check` fails the PR
+if the title has no recognised prefix, because the type decides which
+section the entry lands in.
+
+The title check runs on every PR, including infra-only ones that need no
+fragment: the title lands in git history either way. Only the
+`skip-changelog` label bypasses it, since that skips the whole job.
+
+Two things to wire up in a consumer repo:
+
+- Include `edited` in the workflow's `pull_request` types, otherwise
+  retitling a PR to fix a failure will not re-run the check.
+- Pass the title through the action's `title` input, never by
+  interpolating `${{ github.event.pull_request.title }}` into a `run:`
+  block — a crafted title would be shell injection. The action takes it
+  as an env var for this reason.
+
+`seed` is more forgiving than `check`: it falls back to `chore` for an
+unrecognised prefix, so it stays usable for local experimentation.
 
 ## Local testing
 
