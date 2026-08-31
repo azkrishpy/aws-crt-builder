@@ -4,19 +4,16 @@
 Fragments (`.changes/preview/<pr>.json`) are the source of truth. CHANGELOG.md
 is fully regenerated from them — nothing appends manually.
 
-Directory layout (identical on main and docs):
+Directory layout (as documented in each consumer repo's .changes/README.md):
   .changes/
-  ├── preview/            fragments awaiting the next release
-  ├── <version>/          one dir per release: _meta.json + the shipped fragments
-  │                       the last release of a closed minor line also holds
-  │                       that line's frozen CHANGELOG.md snapshot
+  ├── preview/                        fragments awaiting the next release
+  ├── latest/<version>/               per-patch dirs of the active minor line
+  ├── <M>.<N>.x/                      frozen previous minor line + snapshot
   └── ...
 
-Releases are grouped into minor lines by parsing semver off the directory
-names, so there is no `latest/` directory and nothing is ever renamed.
-
-Root CHANGELOG.md carries every release in the *current* minor line. On docs
-it also carries a [Preview] block; on main it does not (`--no-preview`).
+`render` runs on the docs branch after every merge and keeps the [Preview]
+block. `rollup` runs on the default branch as part of the release commit that
+bumps the version file, and renders without the [Preview] block.
 """
 import argparse
 import json
@@ -202,50 +199,13 @@ def load_release(release_dir):
     return meta, frags
 
 
-def list_releases(changes_dir):
-    """Every release dir `.changes/<x.y.z>/`, semver-descending."""
-    changes_dir = Path(changes_dir)
-    if not changes_dir.exists():
+def list_releases_in(line_dir):
+    """List release dirs under a minor-line dir, semver-desc."""
+    line_dir = Path(line_dir)
+    if not line_dir.exists():
         return []
-    dirs = [d for d in changes_dir.iterdir() if d.is_dir() and SEMVER_RE.match(d.name)]
+    dirs = [d for d in line_dir.iterdir() if d.is_dir() and SEMVER_RE.match(d.name)]
     return sorted(dirs, key=lambda d: parse_semver(d.name), reverse=True)
-
-
-def minor_of(version):
-    M, N, _ = parse_semver(version)
-    return M, N
-
-
-def line_label(minor):
-    return f"{minor[0]}.{minor[1]}.x"
-
-
-def releases_in_line(changes_dir, minor):
-    """Release dirs belonging to one minor line, semver-descending."""
-    return [d for d in list_releases(changes_dir) if minor_of(d.name) == minor]
-
-
-def current_minor(changes_dir):
-    """(M, N) of the newest release, or None if nothing has shipped yet."""
-    releases = list_releases(changes_dir)
-    return minor_of(releases[0].name) if releases else None
-
-
-def closed_minors(changes_dir):
-    """Every minor line except the current one, newest first."""
-    current = current_minor(changes_dir)
-    out = []
-    for d in list_releases(changes_dir):
-        m = minor_of(d.name)
-        if m != current and m not in out:
-            out.append(m)
-    return out
-
-
-def snapshot_path(changes_dir, minor):
-    """A closed line's frozen CHANGELOG.md lives in its final release dir."""
-    releases = releases_in_line(changes_dir, minor)
-    return (releases[0] / "CHANGELOG.md") if releases else None
 
 
 def render_release_section(meta, fragments, hidden_types=HIDDEN_TYPES_CUSTOMER):
@@ -258,10 +218,10 @@ def render_release_section(meta, fragments, hidden_types=HIDDEN_TYPES_CUSTOMER):
 
 
 def render_root_changelog(changes_dir, include_preview=True):
-    """Root CHANGELOG.md: optional [Preview] block + the current minor line.
+    """Regenerate the whole root CHANGELOG.md from preview/ + latest/.
 
-    Older lines are not repeated here; each is frozen into its own snapshot
-    (see snapshot_path), which is what keeps this file openable forever.
+    include_preview is False on the default branch, which carries released
+    history only; the docs branch keeps the [Preview] block.
     """
     body = ["# Changelog", ""]
     if include_preview:
@@ -273,21 +233,27 @@ def render_root_changelog(changes_dir, include_preview=True):
             PREVIEW_END,
             "",
         ]
-    minor = current_minor(changes_dir)
-    if minor is not None:
-        for rel_dir in releases_in_line(changes_dir, minor):
-            meta, frags = load_release(rel_dir)
-            if meta is None:
-                continue
-            body.append(render_release_section(meta, frags).rstrip())
-            body.append("")
+    latest = Path(changes_dir) / "latest"
+    for rel_dir in list_releases_in(latest):
+        meta, frags = load_release(rel_dir)
+        if meta is None:
+            continue
+        body.append(render_release_section(meta, frags).rstrip())
+        body.append("")
     return "\n".join(body).rstrip() + "\n"
 
 
-def render_line_snapshot(changes_dir, minor):
-    """Render a self-contained CHANGELOG.md for one (closed) minor line."""
-    body = [f"# Changelog — {line_label(minor)}", ""]
-    for rel_dir in releases_in_line(changes_dir, minor):
+def render_frozen_line(line_dir):
+    """Render a self-contained CHANGELOG.md for a frozen minor line."""
+    line_dir = Path(line_dir)
+    # Derive minor label from constituent versions (they should all share major.minor).
+    releases = list_releases_in(line_dir)
+    if not releases:
+        return "# Changelog\n"
+    first_version = releases[0].name
+    M, N, _ = parse_semver(first_version)
+    body = [f"# Changelog — {M}.{N}.x", ""]
+    for rel_dir in releases:
         meta, frags = load_release(rel_dir)
         if meta is None:
             continue
@@ -365,21 +331,55 @@ def cmd_render(args):
     return 0
 
 
+def _current_line_minor(latest_dir):
+    """Return (M, N) of the latest/ line by inspecting its release dirs."""
+    releases = list_releases_in(latest_dir)
+    if not releases:
+        return None
+    M, N, _ = parse_semver(releases[0].name)
+    return M, N
+
+
+def _latest_version_in_line(line_dir):
+    """Return the highest semver tuple in a line dir, or None if empty."""
+    releases = list_releases_in(line_dir)
+    if not releases:
+        return None
+    return parse_semver(releases[0].name)
+
+
+def _frozen_lines(changes_dir):
+    """Return frozen minor-line directories (e.g. 0.29.x/), semver-desc by (M, N)."""
+    changes_dir = Path(changes_dir)
+    if not changes_dir.exists():
+        return []
+    lines = [d for d in changes_dir.iterdir() if d.is_dir() and MINOR_LINE_RE.match(d.name)]
+    return sorted(
+        lines,
+        key=lambda d: tuple(int(x) for x in MINOR_LINE_RE.match(d.name).groups()),
+        reverse=True,
+    )
+
+
 def _err(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
 
 
-def _check_no_downgrade(changes_dir, new_tuple, new_version):
-    """Error string if new_version is not strictly newer than every prior release."""
-    releases = list_releases(changes_dir)
-    if not releases:
-        return None
-    highest = parse_semver(releases[0].name)
-    if new_tuple <= highest:
+def _check_no_downgrade(changes, latest, new_tuple, new_version):
+    """Return an error string if new_version is not strictly newer than every prior release."""
+    highest = _latest_version_in_line(latest)
+    if highest is not None and new_tuple <= highest:
         return (
             f"{new_version} is not newer than the latest released "
-            f"{'.'.join(str(x) for x in highest)}"
+            f"{'.'.join(str(x) for x in highest)} in latest/"
         )
+    for frozen in _frozen_lines(changes):
+        highest = _latest_version_in_line(frozen)
+        if highest is not None and new_tuple <= highest:
+            return (
+                f"{new_version} is not newer than frozen line's latest "
+                f"{'.'.join(str(x) for x in highest)} in {frozen.name}/"
+            )
     return None
 
 
@@ -394,59 +394,62 @@ def _infer_bump(current_minor, new_tuple):
     return "minor"
 
 
-def _archive_closing_line(changes_dir, minor):
-    """Freeze a minor line by writing its snapshot into its final release dir.
+def _freeze_current_line(changes, latest, current_minor):
+    """Rename latest/ → M.N.x/, write a frozen CHANGELOG.md, recreate empty latest/.
 
-    No renames are involved: the release dirs stay exactly where they are and
-    grouping is recomputed from their names, so this step is idempotent and
-    safe to re-run.
+    The two-step rename + write is not atomic. If interrupted between them,
+    the frozen directory exists without a CHANGELOG.md snapshot. That
+    half-state is detected by _check_no_half_freeze before rollup starts
+    (see cmd_rollup); this function assumes it starts clean.
     """
-    dest = snapshot_path(changes_dir, minor)
-    if dest is None:
-        return None
-    dest.write_text(render_line_snapshot(changes_dir, minor))
+    M_old, N_old = current_minor
+    frozen_dir = changes / f"{M_old}.{N_old}.x"
+    if frozen_dir.exists():
+        return f"freeze target {frozen_dir} already exists"
+    latest.rename(frozen_dir)
+    (frozen_dir / "CHANGELOG.md").write_text(render_frozen_line(frozen_dir))
+    latest.mkdir(parents=True, exist_ok=True)
     return None
 
 
-def _check_missing_snapshots(changes_dir):
-    """Every closed minor line must carry its frozen CHANGELOG.md snapshot."""
-    for minor in closed_minors(changes_dir):
-        dest = snapshot_path(changes_dir, minor)
-        if dest is not None and not dest.exists():
+def _check_no_half_freeze(changes):
+    """Detect a frozen minor-line dir that has no CHANGELOG.md snapshot yet."""
+    for line in _frozen_lines(changes):
+        if not (line / "CHANGELOG.md").exists() and list_releases_in(line):
             return (
-                f"closed minor line {line_label(minor)} has no frozen snapshot "
-                f"(expected {dest}). Re-run: "
-                f"python3 changelog.py snapshot --line {line_label(minor)}"
+                f"half-frozen state detected: {line}/ has releases but no CHANGELOG.md. "
+                f"Re-run: python3 changelog.py freeze-snapshot --line {line.name} "
+                f"(or manually write {line}/CHANGELOG.md then retry rollup)"
             )
     return None
 
 
-def _open_release_dir(changes_dir, new_version, date, highlights):
-    """Create .changes/<version>/ with _meta.json and move preview fragments in."""
-    release_dir = Path(changes_dir) / new_version
+def _open_release_dir(changes, latest, new_version, date, highlights):
+    """Create latest/<version>/ with _meta.json and move preview fragments in."""
+    release_dir = latest / new_version
     if release_dir.exists():
         return None, f"release dir {release_dir} already exists"
     release_dir.mkdir(parents=True)
     meta = {"version": new_version, "date": date, "highlights": highlights or ""}
     (release_dir / "_meta.json").write_text(json.dumps(meta, indent=2) + "\n")
-    for f in (Path(changes_dir) / "preview").glob("*.json"):
+    for f in (changes / "preview").glob("*.json"):
         f.rename(release_dir / f.name)
     return release_dir, None
 
 
 def cmd_rollup(args):
-    """Patch: add a release dir to the current line. Minor/major: freeze the
-    outgoing line's snapshot first, then open the new line's first release.
+    """Two flows: patch accretes into latest/; minor/major freezes latest/ → M.N.x/.
 
-    Intended to run on the default branch as part of the release commit that
-    bumps the version file, so VERSION and CHANGELOG.md move together.
+    Runs on the default branch as part of the release commit that bumps the
+    version file, so VERSION and CHANGELOG.md move together.
     """
     changes = Path(args.changes_dir)
-    changes.mkdir(parents=True, exist_ok=True)
+    latest = changes / "latest"
+    latest.mkdir(parents=True, exist_ok=True)
 
-    err = _check_missing_snapshots(changes)
-    if err:
-        _err(err)
+    half = _check_no_half_freeze(changes)
+    if half:
+        _err(half)
         return 2
 
     preview = load_preview(changes)
@@ -464,12 +467,12 @@ def cmd_rollup(args):
         _err(f"--date must be YYYY-MM-DD, got {args.date!r}")
         return 2
 
-    err = _check_no_downgrade(changes, new_tuple, args.version)
+    err = _check_no_downgrade(changes, latest, new_tuple, args.version)
     if err:
         _err(err)
         return 2
 
-    current = current_minor(changes)
+    current = _current_line_minor(latest)
     bump = args.bump or _infer_bump(current, new_tuple)
     if bump not in ("patch", "minor", "major"):
         _err(f"--bump must be patch|minor|major, got {bump!r}")
@@ -484,12 +487,12 @@ def cmd_rollup(args):
         return 2
 
     if bump in ("minor", "major") and current is not None:
-        err = _archive_closing_line(changes, current)
+        err = _freeze_current_line(changes, latest, current)
         if err:
             _err(err)
             return 2
 
-    _, err = _open_release_dir(changes, args.version, args.date, args.highlights)
+    _, err = _open_release_dir(changes, latest, args.version, args.date, args.highlights)
     if err:
         _err(err)
         return 2
@@ -502,11 +505,16 @@ def cmd_rollup(args):
 
 
 def _find_original_fragment(changes_dir, pr):
-    """Locate a PR's fragment in preview/ or in any release dir."""
+    """Locate a merged PR's fragment across preview/, latest/, and frozen lines."""
     changes = Path(changes_dir)
     candidates = [changes / "preview" / f"{pr}.json"]
-    for rel_dir in list_releases(changes):
-        candidates.append(rel_dir / f"{pr}.json")
+    latest = changes / "latest"
+    if latest.exists():
+        for rel_dir in list_releases_in(latest):
+            candidates.append(rel_dir / f"{pr}.json")
+    for line_dir in _frozen_lines(changes):
+        for rel_dir in list_releases_in(line_dir):
+            candidates.append(rel_dir / f"{pr}.json")
     for c in candidates:
         if c.exists():
             return c
@@ -535,39 +543,35 @@ def cmd_revert(args):
     return 0
 
 
-def cmd_snapshot(args):
-    """Recovery: (re-)write a closed minor line's frozen CHANGELOG.md."""
-    m = MINOR_LINE_RE.match(args.line)
-    if not m:
-        _err(f"--line must look like 0.29.x, got {args.line!r}")
+def cmd_freeze_snapshot(args):
+    """Recovery: (re-)write the CHANGELOG.md snapshot inside a frozen minor line."""
+    line = Path(args.changes_dir) / args.line
+    if not line.exists() or not MINOR_LINE_RE.match(line.name):
+        _err(f"{line}: not a frozen minor-line directory (expected name like 0.29.x)")
         return 2
-    minor = (int(m.group(1)), int(m.group(2)))
-    dest = snapshot_path(args.changes_dir, minor)
-    if dest is None:
-        _err(f"no releases found for line {args.line}")
-        return 2
-    dest.write_text(render_line_snapshot(args.changes_dir, minor))
-    print(f"wrote {dest}")
+    (line / "CHANGELOG.md").write_text(render_frozen_line(line))
+    print(f"wrote {line / 'CHANGELOG.md'}")
     return 0
 
 
 def cmd_list(args):
-    """Debugging aid: show staged fragments and every released line."""
+    """Debugging aid: show what's staged and what's released in the current line."""
     changes = Path(args.changes_dir)
     unrel = load_preview(changes)
     print(f"[preview]  {len(unrel)} fragment(s)")
     for f in unrel:
         print(f"  #{f['pr']:<6} {f['type']:<6} {f['summary']}")
-    current = current_minor(changes)
-    for minor in ([current] if current else []) + closed_minors(changes):
-        tag = "current" if minor == current else "frozen"
-        print(f"\n[{line_label(minor)}]  ({tag})")
-        for rel_dir in releases_in_line(changes, minor):
-            meta, frags = load_release(rel_dir)
-            v = meta["version"] if meta else rel_dir.name
-            d = meta["date"] if meta else "?"
-            snap = " + snapshot" if (rel_dir / "CHANGELOG.md").exists() else ""
-            print(f"  {v}  {d}  ({len(frags)} fragment(s)){snap}")
+    latest = changes / "latest"
+    print("\n[latest/]")
+    for rel_dir in list_releases_in(latest):
+        meta, frags = load_release(rel_dir)
+        v = meta["version"] if meta else rel_dir.name
+        d = meta["date"] if meta else "?"
+        print(f"  {v}  {d}  ({len(frags)} fragment(s))")
+    print("\n[frozen lines]")
+    for line in _frozen_lines(changes):
+        releases = list_releases_in(line)
+        print(f"  {line.name}  ({len(releases)} release(s))")
     return 0
 
 
@@ -592,20 +596,20 @@ def main(argv=None):
     c.add_argument("--changes-dir", default=".changes")
     c.set_defaults(func=cmd_check)
 
-    r = sub.add_parser("render", help="regenerate root CHANGELOG.md from .changes/")
+    r = sub.add_parser("render", help="regenerate root CHANGELOG.md from preview/ + latest/")
     r.add_argument("--changes-dir", default=".changes")
     r.add_argument("--changelog", default="CHANGELOG.md")
     r.add_argument("--no-preview", dest="preview", action="store_false",
-                   help="Omit the [Preview] block (use when rendering on the "
-                        "default branch; docs keeps the block).")
+                   help="Omit the [Preview] block (used on the default branch; "
+                        "the docs branch keeps it).")
     r.set_defaults(func=cmd_render, preview=True)
 
-    u = sub.add_parser("rollup", help="cut a release: open .changes/<version>/ and rewrite CHANGELOG.md")
+    u = sub.add_parser("rollup", help="cut a release: patch accretes into latest/; minor/major freezes latest/ → M.N.x/")
     u.add_argument("--version", required=True)
     u.add_argument("--date", required=True)
     u.add_argument("--highlights", default="")
     u.add_argument("--bump", choices=["patch", "minor", "major"],
-                   help="Optional; inferred from --version and the newest release if omitted.")
+                   help="Optional; inferred from --version and current latest/ if omitted.")
     u.add_argument("--changes-dir", default=".changes")
     u.add_argument("--changelog", default="CHANGELOG.md")
     u.add_argument("--preview", dest="preview", action="store_true",
@@ -620,15 +624,15 @@ def main(argv=None):
     rv.add_argument("--changes-dir", default=".changes")
     rv.set_defaults(func=cmd_revert)
 
-    ls = sub.add_parser("list", help="show preview fragments and every released line")
+    ls = sub.add_parser("list", help="show preview, latest/, and frozen lines")
     ls.add_argument("--changes-dir", default=".changes")
     ls.set_defaults(func=cmd_list)
 
-    fs = sub.add_parser("snapshot",
-                        help="recovery: re-render a closed line's frozen CHANGELOG.md")
-    fs.add_argument("--line", required=True, help="minor line, e.g. 0.29.x")
+    fs = sub.add_parser("freeze-snapshot",
+                        help="recovery: re-render a frozen line's CHANGELOG.md")
+    fs.add_argument("--line", required=True, help="frozen minor-line dir name, e.g. 0.29.x")
     fs.add_argument("--changes-dir", default=".changes")
-    fs.set_defaults(func=cmd_snapshot)
+    fs.set_defaults(func=cmd_freeze_snapshot)
 
     args = p.parse_args(argv)
     return args.func(args)

@@ -4,16 +4,17 @@ Automated changelog with a **two-branch model**:
 
 - `main` carries source code, the fragment JSON files
   (`.changes/preview/<PR>.json`) authors add with their PR, and the
-  released `CHANGELOG.md`. Between releases no bot commits land on
-  `main`; at release time the rollup rides along in the existing
-  `chore(release):` commit that bumps the version file.
-- `docs` mirrors `main` and additionally carries the rolling
-  `CHANGELOG.md` with a `[Preview]` block. Every merge to `main`
-  produces one bot commit on `docs` that replays the change and
-  re-renders `CHANGELOG.md`.
+  released state (`CHANGELOG.md`, `latest/`, frozen `<M>.<N>.x/`).
+  Between releases no bot commits land on `main`; at release time the
+  rollup rides along in the existing `chore(release):` commit that
+  bumps the version file.
+- `docs` mirrors `main` and carries the same `CHANGELOG.md` *plus* a
+  `[Preview]` block for unshipped work. Every merge to `main` produces
+  one bot commit on `docs` that replays the change and re-renders
+  `CHANGELOG.md`.
 
-The only difference between the two `CHANGELOG.md` files is the
-`[Preview]` block: `docs` has it, `main` does not.
+The `[Preview]` block is the only difference between the two
+`CHANGELOG.md` files: `docs` has it, `main` does not.
 
 Fragments are the human-editable source of truth. `CHANGELOG.md` is
 derived and always regenerated end-to-end from the fragments.
@@ -24,11 +25,11 @@ derived and always regenerated end-to-end from the fragments.
 |-------------------|------------------------|------------------------------------------------------------------------------------|
 | `check`           | PR CI                  | Fail the PR if `.changes/preview/<PR>.json` is missing or invalid.                 |
 | `validate`        | ad-hoc                 | Validate every fragment under `.changes/preview/`.                                 |
-| `render`          | on `docs`, after merge | Regenerate `CHANGELOG.md` from `.changes/`; `--no-preview` for the `main` shape.   |
-| `rollup`          | on `main`, on release  | Open `.changes/<version>/`; on minor/major, freeze the outgoing line first.        |
+| `render`          | on `docs`, after merge | Regenerate `CHANGELOG.md` from `preview/` + `latest/`; `--no-preview` for `main`.   |
+| `rollup`          | on `main`, on release  | Patch: accrete into `latest/`. Minor/major: freeze `latest/` → `<M>.<N>.x/`.       |
 | `revert`          | revert PR opens        | Write a revert fragment; the original stays. Both entries appear in the log.       |
-| `snapshot`        | recovery only          | Re-render a closed line's frozen `CHANGELOG.md` if it went missing.                |
-| `list`            | ad-hoc                 | Print preview fragments and every released line for debugging.                     |
+| `freeze-snapshot` | recovery only          | Re-render a frozen line's `CHANGELOG.md` if it went missing.                       |
+| `list`            | ad-hoc                 | Print preview + latest + frozen lines for debugging.                               |
 
 The docs-branch workflow serializes on a single concurrency group so
 concurrent merges never race on `CHANGELOG.md`:
@@ -39,35 +40,36 @@ concurrency:
   cancel-in-progress: false
 ```
 
-## Directory layout (identical on both branches)
+## Directory layout (on the docs branch)
 
 ```
 .changes/
 ├── preview/                        in-flight fragments awaiting the next release
-│   └── <pr>.json
-├── <version>/                      one dir per release, e.g. 0.29.0/
-│   ├── _meta.json                  { version, date, highlights }
-│   ├── <pr>.json                   the fragments that shipped in it
-│   └── CHANGELOG.md                only in a closed line's *final* release:
-│                                   that line's frozen snapshot
+├── latest/                         active minor line
+│   ├── <version>/                  per-patch release
+│   │   ├── _meta.json              { version, date, highlights }
+│   │   └── <pr>.json               fragments
+│   └── …
+├── <M>.<N>.x/                      frozen previous minor line
+│   ├── <M>.<N>.<P>/                { _meta.json, *.json }
+│   └── CHANGELOG.md                frozen snapshot; never edited again
 └── …
-CHANGELOG.md                        current minor line (+ [Preview] on docs)
+CHANGELOG.md                        root render: [Preview] + current minor line
 ```
 
-There is no `latest/` directory and nothing is ever renamed. Releases
-are grouped into minor lines by parsing semver off the directory names,
-so `0.29.0/` and `0.29.1/` are recognised as the `0.29.x` line. That
-makes every operation idempotent and safe to re-run.
+This layout is mirrored on both branches. Between releases only
+`.changes/preview/<PR>.json` changes on `main`; the release commit is
+what moves fragments into `latest/<version>/` and writes `CHANGELOG.md`
+there.
 
-Root `CHANGELOG.md` shows every release in the **current** minor line,
-newest first. Closed lines are intentionally excluded — the snapshot in
-the line's final release dir (e.g. `.changes/0.29.1/CHANGELOG.md`) is
-the canonical, immutable record for that line. That is what keeps the
-root file openable in a browser indefinitely.
+Root `CHANGELOG.md` shows `[Preview]` + every patch inside `latest/`,
+newest first. Frozen minor lines are intentionally excluded from the
+root file — each `.changes/<M>.<N>.x/CHANGELOG.md` is the canonical,
+immutable record for that line.
 
-Directory sort caveat: filesystem lex sort orders `0.10.0/` before
-`0.2.0/`. This does not affect any customer-facing surface — the
-renderer sorts semver correctly. Only `ls .changes/` looks wrong.
+Directory sort caveat: filesystem lex sort orders `0.10.x/` before
+`0.2.x/`. This does not affect any customer-facing surface — renderers
+sort semver correctly. Only `ls .changes/` looks wrong to maintainers.
 
 ## Contributor flow
 
@@ -96,8 +98,8 @@ The `changelog-render` workflow fires on merge to `main`:
    post-rollup path changes don't confuse git).
 3. Runs `render` and folds any `CHANGELOG.md` change into the same
    commit (`git commit --amend`). The render is unconditional — cheaper
-   than deciding whether the commit touched fragments, and it self-heals
-   drift. A no-op render amends nothing.
+   than working out whether the commit touched fragments, and it
+   self-heals drift. A no-op render amends nothing.
 4. Pushes `docs`.
 
 A cherry-pick conflict confined to `CHANGELOG.md` is auto-resolved by
@@ -107,7 +109,7 @@ release commit, whose `CHANGELOG.md` lacks the `[Preview]` block that
 `docs` has. A conflict in any other path stops the job.
 
 Result: one commit on `docs` per merge on `main`, with the original PR
-title as the subject. Between releases `main` is never touched by the bot.
+title as the subject. Between releases `main` is untouched by the bot.
 
 ## What happens on release
 
@@ -117,12 +119,11 @@ committing, so `VERSION` and `CHANGELOG.md` land in one
 `chore(release):` commit and can never disagree about what shipped.
 
 - **Patch bump**: fragments in `preview/` move into
-  `.changes/<version>/` and root `CHANGELOG.md` gains a dated section.
-  The line stays open; no snapshot is written.
-- **Minor / major bump**: the outgoing line's frozen `CHANGELOG.md`
-  snapshot is written into its final release dir, then
-  `.changes/<version>/` opens the new line and root `CHANGELOG.md`
-  resets to just that release.
+  `latest/<version>/` and root `CHANGELOG.md` gains a dated section.
+  `latest/` stays `latest/`; nothing is frozen.
+- **Minor / major bump**: `latest/` is renamed to `<M>.<N>.x/`, a
+  frozen `CHANGELOG.md` snapshot is written inside it, and a fresh
+  `latest/<version>/` opens with the current preview fragments.
 
 The `preview` fragments become the versioned section — no ceremony, no
 separate promotion step.
@@ -159,7 +160,6 @@ python3 .github/actions/changelog/scripts/changelog.py render --no-preview # mai
 python3 .github/actions/changelog/scripts/changelog.py rollup \
   --version 0.29.0 --date 2026-08-19 --bump minor --highlights "SSO sign-in"
 python3 .github/actions/changelog/scripts/changelog.py list
-python3 .github/actions/changelog/scripts/changelog.py snapshot --line 0.29.x
 ```
 
 ## Example workflows
@@ -181,15 +181,20 @@ original change and its revert — so history is truthful.
 
 ## Operational notes
 
+- **Consumer-repo docs:** each adopting repo should carry a
+  `.changes/README.md` describing this layout for contributors
+  (`awslabs/aws-c-common` has one). That file is the reference for
+  directory names.
 - **Signed-commits repos:** the bot identity used by the render
   workflow and by `cut-release.sh` must have a signing key configured,
   otherwise its pushes will be rejected.
-- **Bootstrap:** on first run the render workflow creates `docs` from
-  the parent of the triggering commit, so the first replay is
-  meaningful.
-- **Recovery:** if a closed line's snapshot goes missing, the next
-  rollup refuses to run and names the `snapshot --line` command to fix
-  it. Nothing is lost — the snapshot regenerates from the fragments.
+- **Branch protection:** protect `docs` so the bot can only touch
+  `.changes/**` and `CHANGELOG.md`. Everything else on that branch is
+  a mistake.
+- **Bootstrap:** on first run the workflow creates `docs` from `main`.
+  If your repo has non-changelog content that should not appear on
+  `docs`, pre-create `docs` as an orphan branch with just the two
+  paths above before enabling the workflow.
 
 ## Fragment schema
 

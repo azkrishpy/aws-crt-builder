@@ -74,8 +74,8 @@ def _run_render_workflow(repo, trigger_sha, docs_branch="docs"):
         git(repo, "checkout", "-q", docs_branch)
 
     # Cherry-pick the merge onto docs. Disable rename detection so that a
-    # rollup's preview/ -> <version>/ moves on docs do not confuse git into
-    # redirecting a fresh preview fragment to a released path.
+    # rollup's preview/ -> latest/ moves on docs do not confuse git into
+    # redirecting a fresh preview fragment to a latest/ path.
     r = subprocess.run(
         ["git", "cherry-pick", "-x", "--allow-empty",
          "--strategy=recursive", "-Xno-renames", trigger_sha],
@@ -235,7 +235,7 @@ def test_release_commit_carries_version_and_changelog_together(scratch_repo):
                 capture=True).stdout.split()
     assert "VERSION" in files
     assert "CHANGELOG.md" in files
-    assert ".changes/0.29.0/843.json" in files
+    assert ".changes/latest/0.29.0/843.json" in files
     # the fragment left preview/ in that same commit (git reports the rename
     # as its destination path only, so check the resulting tree instead)
     tree = git(repo, "ls-tree", "-r", "--name-only", rel_sha,
@@ -312,8 +312,10 @@ def test_full_flow_with_release_rollup(scratch_repo):
     assert "## [0.29.1] — 2026-08-15" in text
     assert "## [0.29.0] — 2026-08-01" in text
     assert "## [Preview]" not in text
-    # patch bump: no line closed, so no snapshot yet
-    assert not (repo / ".changes/0.29.1/CHANGELOG.md").exists()
+    # patch bump: latest/ stays latest/, nothing frozen
+    assert (repo / ".changes/latest/0.29.0").is_dir()
+    assert (repo / ".changes/latest/0.29.1").is_dir()
+    assert not (repo / ".changes/0.29.x").exists()
 
     git(repo, "checkout", "-q", "main")
     sha = _simulate_pr_merge(repo, 878, "feat: tcp_nodelay")
@@ -323,15 +325,16 @@ def test_full_flow_with_release_rollup(scratch_repo):
 
     git(repo, "checkout", "-q", "main")
     root = (repo / "CHANGELOG.md").read_text()
-    frozen = (repo / ".changes/0.29.1/CHANGELOG.md").read_text()
+    frozen = (repo / ".changes/0.29.x/CHANGELOG.md").read_text()
     assert "## [0.30.0] — 2026-08-19" in root
     assert "## [0.29.0]" not in root and "## [0.29.1]" not in root
     assert frozen.startswith("# Changelog — 0.29.x")
     assert "## [0.29.0]" in frozen and "## [0.29.1]" in frozen
     assert "## [0.30.0]" not in frozen
-    # release dirs are never renamed
-    for v in ("0.29.0", "0.29.1", "0.30.0"):
-        assert (repo / ".changes" / v).is_dir()
+    # the outgoing line was renamed to 0.29.x/ and latest/ reopened
+    assert (repo / ".changes/0.29.x/0.29.0").is_dir()
+    assert (repo / ".changes/0.29.x/0.29.1").is_dir()
+    assert (repo / ".changes/latest/0.30.0").is_dir()
 
     git(repo, "checkout", "-q", "docs")
     subjects = git(repo, "log", "--format=%s", capture=True).stdout.strip().splitlines()
