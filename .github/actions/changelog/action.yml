@@ -1,9 +1,9 @@
 name: 'Changelog'
-description: 'Automated changelog: validate/check fragments on PR, render on merge (serialized), rollup on release. Fragments are author-created (JSON pasted into .changes/preview/<PR>.json); no bot writes on the author''s behalf.'
+description: 'Automated changelog: validate/check fragments on PR, render on merge (serialized). Release rollup lives in the auto-release action, folded into the VERSION-bump commit. Fragments are author-created (JSON pasted into .changes/preview/<PR>.json); no bot writes on the author''s behalf.'
 
 inputs:
   mode:
-    description: 'One of: check | render | rollup | revert | validate | list'
+    description: 'One of: check | render | revert | validate | list'
     required: true
   changes-dir:
     description: 'Directory holding fragments.'
@@ -27,21 +27,11 @@ inputs:
   url:
     description: 'PR URL (revert mode).'
     required: false
-  # rollup
-  version:
-    description: 'Release version, x.y.z (rollup mode).'
+  # render
+  no-preview:
+    description: 'Render without the [Preview] block (use on the default branch).'
     required: false
-  date:
-    description: 'Release date, ISO-8601 (rollup mode).'
-    required: false
-  highlights:
-    description: 'One-line highlights string for the release header (rollup mode).'
-    required: false
-    default: ''
-  bump:
-    description: 'Optional: patch | minor | major. Inferred from version + current latest/ if omitted.'
-    required: false
-    default: ''
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -56,10 +46,7 @@ runs:
         ORIGINAL_PR: ${{ inputs.original-pr }}
         REVERT_PR: ${{ inputs.revert-pr }}
         URL: ${{ inputs.url }}
-        VERSION: ${{ inputs.version }}
-        DATE: ${{ inputs.date }}
-        HIGHLIGHTS: ${{ inputs.highlights }}
-        BUMP: ${{ inputs.bump }}
+        NO_PREVIEW: ${{ inputs.no-preview }}
       run: |
         set -euo pipefail
         SCRIPT="${GITHUB_ACTION_PATH}/scripts/changelog.py"
@@ -71,14 +58,9 @@ runs:
             python3 "${SCRIPT}" validate "${CHANGES_DIR}/preview"
             ;;
           render)
-            python3 "${SCRIPT}" render \
-              --changes-dir "${CHANGES_DIR}" --changelog "${CHANGELOG}"
-            ;;
-          rollup)
             EXTRA=()
-            if [[ -n "${BUMP}" ]]; then EXTRA+=(--bump "${BUMP}"); fi
-            python3 "${SCRIPT}" rollup \
-              --version "${VERSION}" --date "${DATE}" --highlights "${HIGHLIGHTS}" \
+            if [[ "${NO_PREVIEW}" == "true" ]]; then EXTRA+=(--no-preview); fi
+            python3 "${SCRIPT}" render \
               --changes-dir "${CHANGES_DIR}" --changelog "${CHANGELOG}" \
               "${EXTRA[@]}"
             ;;

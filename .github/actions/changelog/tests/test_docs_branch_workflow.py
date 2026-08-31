@@ -74,36 +74,47 @@ def _run_render_workflow(repo, trigger_sha, docs_branch="docs"):
         git(repo, "checkout", "-q", docs_branch)
 
     # Cherry-pick the merge onto docs. Disable rename detection so that a
-    # rollup's preview/→latest/ moves on docs do not confuse git into
-    # redirecting a fresh preview fragment to a latest/ path.
+    # rollup's preview/ -> <version>/ moves on docs do not confuse git into
+    # redirecting a fresh preview fragment to a released path.
     r = subprocess.run(
         ["git", "cherry-pick", "-x", "--allow-empty",
          "--strategy=recursive", "-Xno-renames", trigger_sha],
         cwd=repo, capture_output=True, text=True,
     )
     if r.returncode != 0:
-        status = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
-        ).stdout
-        subprocess.run(["git", "cherry-pick", "--abort"], cwd=repo)
-        raise RuntimeError(
-            f"cherry-pick failed for {trigger_sha}\nstderr={r.stderr}\nstatus={status}"
-        )
+        unmerged = sorted(set(subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=repo, capture_output=True, text=True,
+        ).stdout.split()))
+        # CHANGELOG.md is fully derived from .changes/, so a conflict in it
+        # carries no information: take the incoming side and let the render
+        # below overwrite it. This is the normal case when replaying a release
+        # commit, whose CHANGELOG.md has no [Preview] block while docs' does.
+        if unmerged == ["CHANGELOG.md"]:
+            subprocess.run(["git", "checkout", "--theirs", "CHANGELOG.md"], cwd=repo)
+            git(repo, "add", "CHANGELOG.md")
+            env = {**os.environ, "GIT_EDITOR": "true"}
+            subprocess.run(["git", "cherry-pick", "--continue"], cwd=repo, env=env,
+                           capture_output=True, text=True, check=True)
+        else:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=repo,
+                capture_output=True, text=True,
+            ).stdout
+            subprocess.run(["git", "cherry-pick", "--abort"], cwd=repo)
+            raise RuntimeError(
+                f"cherry-pick failed for {trigger_sha}\nstderr={r.stderr}\nstatus={status}"
+            )
 
-    # If preview fragments changed on this commit, render + amend.
-    diff = git(
-        repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-m",
-        "--diff-filter=AM", trigger_sha, capture=True,
-    ).stdout.splitlines()
-    frags = sorted({f for f in diff if f.startswith(".changes/preview/") and f.endswith(".json")})
-    if not frags:
-        return None  # replay only; no render
-
+    # docs' CHANGELOG.md is always the full docs-shaped render (with the
+    # [Preview] block). Rendering unconditionally is cheaper than deciding
+    # whether this commit touched fragments, and it self-heals any drift.
     run([sys.executable, str(CHANGELOG_PY), "render"], cwd=repo)
     git(repo, "add", "CHANGELOG.md")
     r = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo)
-    if r.returncode != 0:
-        git(repo, "commit", "-q", "--amend", "--no-edit")
+    if r.returncode == 0:
+        return None  # render changed nothing; pure replay
+    git(repo, "commit", "-q", "--amend", "--no-edit")
     return git(repo, "log", "--format=%s", "-1", capture=True).stdout.strip()
 
 
@@ -197,74 +208,134 @@ def test_docs_replays_source_only_merges_without_render(scratch_repo):
     assert (repo / "src_only.txt").exists()
 
 
+def _simulate_release(repo, version, date, bump, highlights=""):
+    """Simulate cut-release.sh: roll the changelog up into the VERSION-bump
+    commit, on main. Rollup renders without a [Preview] block there."""
+    git(repo, "checkout", "-q", "main")
+    argv = [sys.executable, str(CHANGELOG_PY), "rollup",
+            "--version", version, "--date", date, "--bump", bump]
+    if highlights:
+        argv += ["--highlights", highlights]
+    run(argv, cwd=repo)
+    (repo / "VERSION").write_text(version + "\n")
+    git(repo, "add", "VERSION", ".changes", "CHANGELOG.md")
+    git(repo, "commit", "-q", "-m",
+        f"chore(release): {bump}-update to VERSION - {version}")
+    return git(repo, "rev-parse", "HEAD", capture=True).stdout.strip()
+
+
+def test_release_commit_carries_version_and_changelog_together(scratch_repo):
+    """The rollup must land in the same commit as the version bump."""
+    repo = scratch_repo
+    sha = _simulate_pr_merge(repo, 843, "feat: SSO sign-in")
+    _run_render_workflow(repo, sha)
+    rel_sha = _simulate_release(repo, "0.29.0", "2026-08-01", "minor")
+
+    files = git(repo, "show", "--name-only", "--format=", rel_sha,
+                capture=True).stdout.split()
+    assert "VERSION" in files
+    assert "CHANGELOG.md" in files
+    assert ".changes/0.29.0/843.json" in files
+    # the fragment left preview/ in that same commit (git reports the rename
+    # as its destination path only, so check the resulting tree instead)
+    tree = git(repo, "ls-tree", "-r", "--name-only", rel_sha,
+               capture=True).stdout.split()
+    assert not any(f.startswith(".changes/preview/") for f in tree)
+
+
+def test_main_changelog_has_no_preview_block(scratch_repo):
+    """main carries released history only; the [Preview] view lives on docs."""
+    repo = scratch_repo
+    sha = _simulate_pr_merge(repo, 843, "feat: SSO sign-in")
+    _run_render_workflow(repo, sha)
+    _simulate_release(repo, "0.29.0", "2026-08-01", "minor")
+
+    main_text = (repo / "CHANGELOG.md").read_text()
+    assert "## [0.29.0]" in main_text
+    assert "## [Preview]" not in main_text
+
+
+def test_docs_keeps_empty_preview_after_release(scratch_repo):
+    """docs always carries a [Preview] block. Right after a release it is
+    empty, and the next fragment-bearing merge repopulates it."""
+    repo = scratch_repo
+    sha = _simulate_pr_merge(repo, 843, "feat: SSO sign-in")
+    _run_render_workflow(repo, sha)
+    rel_sha = _simulate_release(repo, "0.29.0", "2026-08-01", "minor")
+    _run_render_workflow(repo, rel_sha)
+
+    git(repo, "checkout", "-q", "docs")
+    text = (repo / "CHANGELOG.md").read_text()
+    assert "## [Preview]" in text
+    assert "_Nothing yet._" in text
+    assert "## [0.29.0]" in text
+    # the release entry moved out of preview into the version section
+    assert text.index("## [Preview]") < text.index("## [0.29.0]")
+
+    git(repo, "checkout", "-q", "main")
+    sha = _simulate_pr_merge(repo, 867, "fix: fd leak")
+    _run_render_workflow(repo, sha)
+    git(repo, "checkout", "-q", "docs")
+    text = (repo / "CHANGELOG.md").read_text()
+    assert "## [Preview]" in text
+    assert "#867" in text
+    assert "## [0.29.0]" in text
+
+
 def test_full_flow_with_release_rollup(scratch_repo):
-    """End-to-end: three merges → 0.29.0 → two more merges → 0.29.1 → minor bump → 0.30.0."""
+    """End-to-end: merges → 0.29.0 → merges → 0.29.1 → minor bump → 0.30.0,
+    with every rollup landing on main and replaying onto docs."""
     repo = scratch_repo
     for pr, title in [
         (843, "feat: SSO sign-in"),
         (850, "fix: idempotency drop"),
         (858, "chore: bump aws-lc"),
     ]:
-        sha = _simulate_pr_merge(repo, pr, title,
-                                 )
-        _run_render_workflow(repo, sha)
-        git(repo, "checkout", "-q", "main")
-
-    # Release 0.29.0 on docs branch.
-    git(repo, "checkout", "-q", "docs")
-    run(
-        [sys.executable, str(CHANGELOG_PY), "rollup",
-         "--version", "0.29.0", "--date", "2026-08-01", "--bump", "minor",
-         "--highlights", "SSO sign-in"],
-        cwd=repo,
-    )
-    git(repo, "add", ".changes", "CHANGELOG.md")
-    git(repo, "commit", "-q", "-m", "Release 0.29.0")
-
-    # Two more merges + patch release.
-    git(repo, "checkout", "-q", "main")
-    for pr, title in [(867, "fix: fd leak"), (870, "doc: retry defaults")]:
         sha = _simulate_pr_merge(repo, pr, title)
         _run_render_workflow(repo, sha)
         git(repo, "checkout", "-q", "main")
 
-    git(repo, "checkout", "-q", "docs")
-    run(
-        [sys.executable, str(CHANGELOG_PY), "rollup",
-         "--version", "0.29.1", "--date", "2026-08-15", "--bump", "patch"],
-        cwd=repo,
-    )
-    git(repo, "add", ".changes", "CHANGELOG.md")
-    git(repo, "commit", "-q", "-m", "Release 0.29.1")
+    rel = _simulate_release(repo, "0.29.0", "2026-08-01", "minor",
+                            highlights="SSO sign-in")
+    _run_render_workflow(repo, rel)
 
+    for pr, title in [(867, "fix: fd leak"), (870, "doc: retry defaults")]:
+        git(repo, "checkout", "-q", "main")
+        sha = _simulate_pr_merge(repo, pr, title)
+        _run_render_workflow(repo, sha)
+
+    rel = _simulate_release(repo, "0.29.1", "2026-08-15", "patch")
+    _run_render_workflow(repo, rel)
+
+    git(repo, "checkout", "-q", "main")
     text = (repo / "CHANGELOG.md").read_text()
-    assert "## [Preview]" in text
     assert "## [0.29.1] — 2026-08-15" in text
     assert "## [0.29.0] — 2026-08-01" in text
+    assert "## [Preview]" not in text
+    # patch bump: no line closed, so no snapshot yet
+    assert not (repo / ".changes/0.29.1/CHANGELOG.md").exists()
 
-    # Minor bump — freeze 0.29.x
     git(repo, "checkout", "-q", "main")
     sha = _simulate_pr_merge(repo, 878, "feat: tcp_nodelay")
     _run_render_workflow(repo, sha)
-    git(repo, "checkout", "-q", "docs")
-    run(
-        [sys.executable, str(CHANGELOG_PY), "rollup",
-         "--version", "0.30.0", "--date", "2026-08-19", "--bump", "minor"],
-        cwd=repo,
-    )
-    git(repo, "add", ".changes", "CHANGELOG.md")
-    git(repo, "commit", "-q", "-m", "Release 0.30.0")
+    rel = _simulate_release(repo, "0.30.0", "2026-08-19", "minor")
+    _run_render_workflow(repo, rel)
 
+    git(repo, "checkout", "-q", "main")
     root = (repo / "CHANGELOG.md").read_text()
-    frozen = (repo / ".changes/0.29.x/CHANGELOG.md").read_text()
+    frozen = (repo / ".changes/0.29.1/CHANGELOG.md").read_text()
     assert "## [0.30.0] — 2026-08-19" in root
-    assert "## [0.29.0]" not in root  # frozen out of root
-    assert "## [0.29.0]" in frozen
-    assert "## [0.29.1]" in frozen
-    # docs history shows PR-scoped (cherry-picked) and release commits
+    assert "## [0.29.0]" not in root and "## [0.29.1]" not in root
+    assert frozen.startswith("# Changelog — 0.29.x")
+    assert "## [0.29.0]" in frozen and "## [0.29.1]" in frozen
+    assert "## [0.30.0]" not in frozen
+    # release dirs are never renamed
+    for v in ("0.29.0", "0.29.1", "0.30.0"):
+        assert (repo / ".changes" / v).is_dir()
+
+    git(repo, "checkout", "-q", "docs")
     subjects = git(repo, "log", "--format=%s", capture=True).stdout.strip().splitlines()
-    assert "Release 0.30.0" in subjects
-    assert "Release 0.29.1" in subjects
-    assert "Release 0.29.0" in subjects
-    assert any("SSO sign-in" in s for s in subjects)  # cherry-picked PR title
+    assert any("VERSION - 0.30.0" in s for s in subjects)
+    assert any("VERSION - 0.29.1" in s for s in subjects)
+    assert any("SSO sign-in" in s for s in subjects)
     assert any("tcp_nodelay" in s for s in subjects)

@@ -21,6 +21,9 @@
 #   DRY_RUN         "true" | "false" -- if true, log the plan and stop before
 #                    touching the deploy key, writing, committing, tagging,
 #                    or publishing anything
+#
+# If the repo has a .changes/ directory, the changelog rollup is folded into
+# the same commit as the VERSION bump (see the rollup block below).
 
 set -euo pipefail
 
@@ -37,7 +40,7 @@ summary() { [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && printf '%s\n' "$1" >> "$GITHU
 echo "Plan: ${PREVIOUS_TAG} -> ${NEW_TAG} (${BUMP} bump, SOVERSION=${NEW_SOVERSION})"
 
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
-  echo "DRY RUN: would write '${NEW_VERSION}' to '${VERSION_FILE}', push to the default branch, tag '${NEW_TAG}', and create a GitHub Release."
+  echo "DRY RUN: would write '${NEW_VERSION}' to '${VERSION_FILE}', roll up the changelog into the same commit, push to the default branch, tag '${NEW_TAG}', and create a GitHub Release."
   summary ""
   summary "**DRY RUN: would have tagged \`${NEW_TAG}\` and created a GitHub Release. No changes were made.**"
   exit 0
@@ -90,6 +93,32 @@ git config user.email "aws-sdk-common-runtime@amazon.com"
 
 printf '%s\n' "$NEW_VERSION" > "$VERSION_FILE"
 git add "$VERSION_FILE"
+
+# Changelog rollup rides along in this same commit, so VERSION and
+# CHANGELOG.md can never disagree about what a release contains. Skipped
+# entirely in repos that have not adopted the changelog (no .changes/).
+CHANGELOG_PY="${GITHUB_ACTION_PATH:-}/../changelog/scripts/changelog.py"
+if [[ -d .changes && -f "$CHANGELOG_PY" ]]; then
+  # Exit 1 means "no fragments to roll up" -- a release with no customer-facing
+  # changes is legitimate, so carry on with the VERSION bump alone. Exit 2 is a
+  # real error (bad version, missing snapshot) and must stop the release.
+  set +e
+  python3 "$CHANGELOG_PY" rollup \
+    --version "$NEW_VERSION" \
+    --bump    "$BUMP" \
+    --date    "$(date -u +%F)"
+  rollup_rc=$?
+  set -e
+  case "$rollup_rc" in
+    0) git add .changes CHANGELOG.md ;;
+    1) echo "No changelog fragments to roll up; releasing VERSION bump only." ;;
+    *) echo "ERROR: changelog rollup failed (exit ${rollup_rc}); aborting release." >&2
+       exit "$rollup_rc" ;;
+  esac
+else
+  echo "No .changes/ directory (or changelog script unavailable); skipping changelog rollup."
+fi
+
 git commit -m "chore(release): ${BUMP}-update to VERSION - ${NEW_VERSION}"
 git push origin "$DEFAULT_BRANCH"
 

@@ -56,26 +56,36 @@ jobs:
           # Replay the merge commit onto docs. -x records the origin sha in
           # the message; --allow-empty tolerates identical trees;
           # -Xno-renames avoids false renames when docs has moved fragments
-          # from preview/ to latest/ via a prior rollup.
+          # from preview/ into a released <version>/ dir via a prior rollup.
           if ! git cherry-pick -x --allow-empty \
                  --strategy=recursive -Xno-renames "${TRIGGER_SHA}"; then
-            echo "ERROR: cherry-pick conflict. Manual intervention required." >&2
-            git cherry-pick --abort || true
-            exit 1
+            UNMERGED=$(git diff --name-only --diff-filter=U | sort -u)
+            if [[ "$UNMERGED" == "CHANGELOG.md" ]]; then
+              # CHANGELOG.md is derived entirely from .changes/, so a conflict
+              # in it carries no information. Take the incoming side; the
+              # unconditional render below rewrites the file anyway. This is
+              # the expected case when replaying a release commit, whose
+              # CHANGELOG.md has no [Preview] block while docs' does.
+              echo "Auto-resolving CHANGELOG.md conflict (derived file)."
+              git checkout --theirs CHANGELOG.md
+              git add CHANGELOG.md
+              GIT_EDITOR=true git cherry-pick --continue
+            else
+              echo "ERROR: cherry-pick conflict in: ${UNMERGED:-<none>}" >&2
+              echo "       Manual intervention required." >&2
+              git cherry-pick --abort || true
+              exit 1
+            fi
           fi
 
-          # If any preview fragments changed on this commit, render and amend.
-          FRAGS=$(git diff-tree --no-commit-id --name-only -r -m \
-                    --diff-filter=AM "${TRIGGER_SHA}" \
-                  | grep -E '^\.changes/preview/.*\.json$' \
-                  | sort -u || true)
-
-          if [[ -n "$FRAGS" ]]; then
-            python3 "${CHANGELOG_PY}" render
-            git add CHANGELOG.md
-            if ! git diff --cached --quiet; then
-              git commit --amend --no-edit
-            fi
+          # docs' CHANGELOG.md is always the full docs-shaped render, including
+          # the [Preview] block. Rendering unconditionally is cheaper than
+          # working out whether this commit touched fragments, and it self-heals
+          # any drift. A no-op render leaves nothing staged and amends nothing.
+          python3 "${CHANGELOG_PY}" render
+          git add CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
           fi
 
           git push origin "${DOCS_BRANCH}"

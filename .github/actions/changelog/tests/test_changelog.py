@@ -32,7 +32,7 @@ def _render(tmp_path):
     return (tmp_path / "CHANGELOG.md").read_text()
 
 
-def _rollup(tmp_path, version, date, bump=None, highlights=""):
+def _rollup(tmp_path, version, date, bump=None, highlights="", preview=True):
     argv = [
         "rollup", "--version", version, "--date", date,
         "--changes-dir", str(tmp_path / ".changes"),
@@ -42,6 +42,8 @@ def _rollup(tmp_path, version, date, bump=None, highlights=""):
         argv += ["--bump", bump]
     if highlights:
         argv += ["--highlights", highlights]
+    if preview:
+        argv += ["--preview"]
     return cl.main(argv)
 
 
@@ -175,7 +177,7 @@ def test_rollup_patch_moves_fragments_and_creates_meta(tmp_path):
     _seed(tmp_path, 2, "chore: bump")
     assert _rollup(tmp_path, "0.29.0", "2026-08-01") == 0
     assert list((tmp_path / ".changes" / "preview").glob("*.json")) == []
-    rel = tmp_path / ".changes" / "latest" / "0.29.0"
+    rel = tmp_path / ".changes" / "0.29.0"
     meta = json.loads((rel / "_meta.json").read_text())
     assert meta["version"] == "0.29.0" and meta["date"] == "2026-08-01"
     assert {p.name for p in rel.glob("*.json") if p.name != "_meta.json"} == {"1.json", "2.json"}
@@ -186,9 +188,10 @@ def test_rollup_patch_accretes_into_same_line(tmp_path):
     _rollup(tmp_path, "0.29.0", "2026-08-01")
     _seed(tmp_path, 2, "fix: b")
     _rollup(tmp_path, "0.29.1", "2026-08-15")
-    latest = tmp_path / ".changes" / "latest"
-    assert (latest / "0.29.0").is_dir() and (latest / "0.29.1").is_dir()
-    assert not (tmp_path / ".changes" / "0.29.x").exists()
+    changes = tmp_path / ".changes"
+    assert (changes / "0.29.0").is_dir() and (changes / "0.29.1").is_dir()
+    # no freeze on a patch bump: the line's snapshot is not written yet
+    assert not (changes / "0.29.1" / "CHANGELOG.md").exists()
     text = (tmp_path / "CHANGELOG.md").read_text()
     assert "## [0.29.1] — 2026-08-15" in text
     assert "## [0.29.0] — 2026-08-01" in text
@@ -219,11 +222,11 @@ def test_rollup_minor_freezes_previous_line(tmp_path):
     _rollup(tmp_path, "0.30.0", "2026-08-19")
 
     changes = tmp_path / ".changes"
-    assert (changes / "latest" / "0.30.0").is_dir()
-    assert not (changes / "latest" / "0.29.0").exists()
-    assert (changes / "0.29.x" / "0.29.0").is_dir()
-    assert (changes / "0.29.x" / "0.29.1").is_dir()
-    frozen = (changes / "0.29.x" / "CHANGELOG.md").read_text()
+    # nothing is renamed: release dirs stay put, grouping is by semver
+    assert (changes / "0.30.0").is_dir()
+    assert (changes / "0.29.0").is_dir() and (changes / "0.29.1").is_dir()
+    # the closed line's snapshot lands in its final release dir
+    frozen = (changes / "0.29.1" / "CHANGELOG.md").read_text()
     assert cl.PREVIEW_START not in frozen
     assert frozen.startswith("# Changelog — 0.29.x")
     assert "## [0.29.1]" in frozen and "## [0.29.0]" in frozen
@@ -235,12 +238,12 @@ def test_rollup_minor_freezes_previous_line(tmp_path):
     assert cl.PREVIEW_START in root
 
 
-def test_rollup_minor_from_empty_latest(tmp_path):
+def test_rollup_minor_from_no_prior_releases(tmp_path):
     _seed(tmp_path, 1, "feat: initial")
     assert _rollup(tmp_path, "0.1.0", "2026-01-01") == 0
-    assert (tmp_path / ".changes" / "latest" / "0.1.0").is_dir()
-    assert [p for p in (tmp_path / ".changes").iterdir()
-            if p.is_dir() and p.name.endswith(".x")] == []
+    assert (tmp_path / ".changes" / "0.1.0").is_dir()
+    # first release ever: nothing to freeze, so no snapshot
+    assert not (tmp_path / ".changes" / "0.1.0" / "CHANGELOG.md").exists()
 
 
 def test_rollup_major_freezes_current_minor_line(tmp_path):
@@ -249,8 +252,9 @@ def test_rollup_major_freezes_current_minor_line(tmp_path):
     _seed(tmp_path, 2, "feat: big change")
     _rollup(tmp_path, "1.0.0", "2027-01-01")
     changes = tmp_path / ".changes"
-    assert (changes / "0.29.x" / "0.29.0").is_dir()
-    assert (changes / "latest" / "1.0.0").is_dir()
+    assert (changes / "0.29.0").is_dir() and (changes / "1.0.0").is_dir()
+    assert (changes / "0.29.0" / "CHANGELOG.md").read_text().startswith(
+        "# Changelog — 0.29.x")
 
 
 def test_rollup_rejects_duplicate_version(tmp_path):
@@ -270,7 +274,7 @@ def test_rollup_bad_date_rejected(tmp_path):
     assert _rollup(tmp_path, "0.1.0", "not-a-date") == 2
 
 
-def test_rollup_rejects_downgrade_in_latest(tmp_path):
+def test_rollup_rejects_downgrade_in_current_line(tmp_path):
     _seed(tmp_path, 1, "feat: a")
     _rollup(tmp_path, "0.29.1", "2026-08-15")
     _seed(tmp_path, 2, "fix: b")
@@ -317,7 +321,7 @@ def test_revert_creates_fragment_keeps_original(tmp_path):
     assert "#843" in text and "#900" in text
 
 
-def test_revert_looks_up_original_in_latest(tmp_path):
+def test_revert_looks_up_original_in_released_dir(tmp_path):
     _seed(tmp_path, 843, "feat: SSO sign-in")
     _rollup(tmp_path, "0.29.0", "2026-08-01")
     cl.main([
@@ -369,7 +373,7 @@ def test_render_skips_schema_invalid_fragment(tmp_path, capsys):
 def test_render_skips_release_with_malformed_meta(tmp_path, capsys):
     _seed(tmp_path, 1, "feat: a")
     _rollup(tmp_path, "0.29.0", "2026-08-01")
-    (tmp_path / ".changes" / "latest" / "0.29.0" / "_meta.json").write_text(
+    (tmp_path / ".changes" / "0.29.0" / "_meta.json").write_text(
         '{"version": "0.29.0"}'
     )
     text = _render(tmp_path)
@@ -385,36 +389,46 @@ def test_render_excludes_frozen_lines(tmp_path):
     _rollup(tmp_path, "0.30.0", "2026-08-19")
     root = (tmp_path / "CHANGELOG.md").read_text()
     assert "## [0.30.0]" in root and "## [0.29.0]" not in root
-    frozen = (tmp_path / ".changes" / "0.29.x" / "CHANGELOG.md").read_text()
+    frozen = (tmp_path / ".changes" / "0.29.0" / "CHANGELOG.md").read_text()
     assert "## [0.29.0]" in frozen and "## [0.30.0]" not in frozen
 
 
-def test_rollup_recovers_from_half_freeze(tmp_path):
+def test_rollup_blocks_on_missing_snapshot(tmp_path):
+    """A closed line without its snapshot blocks the next rollup until repaired."""
     _seed(tmp_path, 1, "feat: a")
     _rollup(tmp_path, "0.29.0", "2026-08-01")
-    latest = tmp_path / ".changes" / "latest"
-    frozen = tmp_path / ".changes" / "0.29.x"
-    latest.rename(frozen)
-    latest.mkdir()
     _seed(tmp_path, 2, "feat: b")
-    assert _rollup(tmp_path, "0.30.0", "2026-08-19") == 2
+    _rollup(tmp_path, "0.30.0", "2026-08-19")
+    snap = tmp_path / ".changes" / "0.29.0" / "CHANGELOG.md"
+    assert snap.exists()
+    snap.unlink()
+
+    _seed(tmp_path, 3, "fix: c")
+    assert _rollup(tmp_path, "0.31.0", "2026-09-01") == 2
 
     rc = cl.main([
-        "freeze-snapshot", "--line", "0.29.x",
+        "snapshot", "--line", "0.29.x",
         "--changes-dir", str(tmp_path / ".changes"),
     ])
     assert rc == 0
-    assert (frozen / "CHANGELOG.md").exists()
-    assert _rollup(tmp_path, "0.30.0", "2026-08-19") == 0
+    assert snap.exists()
+    assert _rollup(tmp_path, "0.31.0", "2026-09-01") == 0
 
 
-def test_freeze_snapshot_rejects_non_frozen_dir(tmp_path):
-    (tmp_path / ".changes" / "not-a-line").mkdir(parents=True)
-    rc = cl.main([
-        "freeze-snapshot", "--line", "not-a-line",
+def test_snapshot_rejects_bad_line_name(tmp_path):
+    (tmp_path / ".changes").mkdir(parents=True)
+    assert cl.main([
+        "snapshot", "--line", "not-a-line",
         "--changes-dir", str(tmp_path / ".changes"),
-    ])
-    assert rc == 2
+    ]) == 2
+
+
+def test_snapshot_rejects_unknown_line(tmp_path):
+    (tmp_path / ".changes").mkdir(parents=True)
+    assert cl.main([
+        "snapshot", "--line", "9.9.x",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ]) == 2
 
 
 # ---------- list smoke ----------
@@ -425,7 +439,7 @@ def test_list_smoke(tmp_path, capsys):
     _seed(tmp_path, 2, "fix: b")
     assert cl.main(["list", "--changes-dir", str(tmp_path / ".changes")]) == 0
     out = capsys.readouterr().out
-    assert "preview" in out and "latest" in out
+    assert "preview" in out and "0.1.x" in out and "current" in out
 
 
 # ---------- full lifecycle ----------
@@ -449,13 +463,13 @@ def test_full_lifecycle_end_to_end(tmp_path):
     root = (tmp_path / "CHANGELOG.md").read_text()
     assert "## [0.29.1] — 2026-08-15" in root
     assert "## [0.29.0] — 2026-08-01" in root
-    assert not (tmp_path / ".changes" / "0.29.x").exists()
+    assert not (tmp_path / ".changes" / "0.29.1" / "CHANGELOG.md").exists()
 
     _seed(tmp_path, 875, "fix: retry backoff off-by-one")
     _seed(tmp_path, 878, "feat: add tcp_nodelay to socket options")
     _rollup(tmp_path, "0.30.0", "2026-08-19")
 
-    frozen = (tmp_path / ".changes" / "0.29.x" / "CHANGELOG.md").read_text()
+    frozen = (tmp_path / ".changes" / "0.29.1" / "CHANGELOG.md").read_text()
     assert frozen.startswith("# Changelog — 0.29.x")
     assert "## [0.29.1]" in frozen and "## [0.29.0]" in frozen
     assert cl.PREVIEW_START not in frozen
