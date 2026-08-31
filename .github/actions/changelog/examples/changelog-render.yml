@@ -24,10 +24,18 @@ jobs:
           fetch-depth: 0
           ssh-key: ${{ secrets.CHANGELOG_DEPLOY_KEY }}
 
+      # The render script lives in aws-crt-builder, not in this repo.
+      - uses: actions/checkout@v4
+        with:
+          repository: awslabs/aws-crt-builder
+          ref: main
+          path: .crt-builder
+
       - name: Replay merge onto docs, refresh preview
         env:
           TRIGGER_SHA: ${{ github.sha }}
           DOCS_BRANCH: docs
+          CHANGELOG_PY: ${{ github.workspace }}/.crt-builder/.github/actions/changelog/scripts/changelog.py
         run: |
           set -euo pipefail
 
@@ -63,7 +71,7 @@ jobs:
                   | sort -u || true)
 
           if [[ -n "$FRAGS" ]]; then
-            python3 .github/actions/changelog/scripts/changelog.py render
+            python3 "${CHANGELOG_PY}" render
             git add CHANGELOG.md
             if ! git diff --cached --quiet; then
               git commit --amend --no-edit

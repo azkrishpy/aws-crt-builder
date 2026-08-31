@@ -145,6 +145,11 @@ python3 .github/actions/changelog/scripts/changelog.py list
 `examples/changelog-rollup.yml`. Copy into a consumer repo's
 `.github/workflows/`.
 
+`check` runs through the composite action (`uses:`). `render` and
+`rollup` need raw git access to the `docs` branch, so they run inline
+and check this repo out to `.crt-builder/` to reach `changelog.py`.
+Pin that `ref:` to a tag or SHA in production.
+
 ## Reverts
 
 Revert PRs write a new fragment referencing both PRs; the original

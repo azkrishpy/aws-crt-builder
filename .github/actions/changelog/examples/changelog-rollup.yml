@@ -40,10 +40,17 @@ jobs:
           ref: docs
           ssh-key: ${{ secrets.CHANGELOG_DEPLOY_KEY }}
 
+      # The rollup script lives in aws-crt-builder, not in this repo.
+      - uses: actions/checkout@v4
+        with:
+          repository: awslabs/aws-crt-builder
+          ref: main
+          path: .crt-builder
+
       - name: Rollup preview → ${{ inputs.version }}
         run: |
           set -euo pipefail
-          python3 .github/actions/changelog/scripts/changelog.py rollup \
+          python3 "${GITHUB_WORKSPACE}/.crt-builder/.github/actions/changelog/scripts/changelog.py" rollup \
             --version "${{ inputs.version }}" \
             --bump    "${{ inputs.bump }}" \
             --date    "${{ inputs.date }}" \
