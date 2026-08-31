@@ -21,9 +21,7 @@
 #   DRY_RUN         "true" | "false" -- if true, log the plan and stop before
 #                    touching the deploy key, writing, committing, tagging,
 #                    or publishing anything
-#
-# If the repo has a .changes/ directory, the changelog rollup is folded into
-# the same commit as the VERSION bump (see the rollup block below).
+
 
 set -euo pipefail
 
@@ -94,14 +92,11 @@ git config user.email "aws-sdk-common-runtime@amazon.com"
 printf '%s\n' "$NEW_VERSION" > "$VERSION_FILE"
 git add "$VERSION_FILE"
 
-# Changelog rollup rides along in this same commit, so VERSION and
-# CHANGELOG.md can never disagree about what a release contains. Skipped
-# entirely in repos that have not adopted the changelog (no .changes/).
+# Roll the changelog into this same commit so VERSION and CHANGELOG.md cannot
+# disagree. Skipped in repos with no .changes/.
 CHANGELOG_PY="${GITHUB_ACTION_PATH:-}/../changelog/scripts/changelog.py"
 if [[ -d .changes && -f "$CHANGELOG_PY" ]]; then
-  # Exit 1 means "no fragments to roll up" -- a release with no customer-facing
-  # changes is legitimate, so carry on with the VERSION bump alone. Exit 2 is a
-  # real error (bad version, missing snapshot) and must stop the release.
+  # Exit 1 = nothing to roll up (fine); exit 2 = real error (must stop).
   set +e
   python3 "$CHANGELOG_PY" rollup \
     --version "$NEW_VERSION" \

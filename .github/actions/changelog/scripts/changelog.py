@@ -4,16 +4,15 @@
 Fragments (`.changes/preview/<pr>.json`) are the source of truth. CHANGELOG.md
 is fully regenerated from them — nothing appends manually.
 
-Directory layout (as documented in each consumer repo's .changes/README.md):
+Directory layout (see each consumer repo's .changes/README.md):
   .changes/
   ├── preview/                        fragments awaiting the next release
   ├── latest/<version>/               per-patch dirs of the active minor line
   ├── <M>.<N>.x/                      frozen previous minor line + snapshot
   └── ...
 
-`render` runs on the docs branch after every merge and keeps the [Preview]
-block. `rollup` runs on the default branch as part of the release commit that
-bumps the version file, and renders without the [Preview] block.
+`render` runs on docs and keeps the [Preview] block; `rollup` runs on the
+default branch inside the release commit and omits it.
 """
 import argparse
 import json
@@ -218,11 +217,7 @@ def render_release_section(meta, fragments, hidden_types=HIDDEN_TYPES_CUSTOMER):
 
 
 def render_root_changelog(changes_dir, include_preview=True):
-    """Regenerate the whole root CHANGELOG.md from preview/ + latest/.
-
-    include_preview is False on the default branch, which carries released
-    history only; the docs branch keeps the [Preview] block.
-    """
+    """Regenerate root CHANGELOG.md from preview/ + latest/."""
     body = ["# Changelog", ""]
     if include_preview:
         body += [
@@ -313,11 +308,7 @@ def check_title(title):
 
 
 def cmd_check(args):
-    """Gate a PR: title convention always, fragment presence unless waived.
-
-    The title is checked even when the fragment requirement is waived
-    (infra-only PRs), because the title still lands in git history.
-    """
+    """Gate a PR: title convention always, fragment unless waived."""
     if args.title is not None:
         err = check_title(args.title)
         if err:
@@ -469,11 +460,7 @@ def _open_release_dir(changes, latest, new_version, date, highlights):
 
 
 def cmd_rollup(args):
-    """Two flows: patch accretes into latest/; minor/major freezes latest/ → M.N.x/.
-
-    Runs on the default branch as part of the release commit that bumps the
-    version file, so VERSION and CHANGELOG.md move together.
-    """
+    """Patch accretes into latest/; minor/major freezes latest/ → M.N.x/."""
     changes = Path(args.changes_dir)
     latest = changes / "latest"
     latest.mkdir(parents=True, exist_ok=True)
@@ -626,8 +613,7 @@ def main(argv=None):
                        help="CI: assert the PR title follows the type convention "
                             "and a valid fragment exists")
     c.add_argument("--pr", type=int, required=True)
-    c.add_argument("--title", help="PR title; validated against the type prefix "
-                                   "convention. Omit to skip the title check.")
+    c.add_argument("--title", help="PR title; omit to skip the title check.")
     c.add_argument("--no-fragment", dest="require_fragment", action="store_false",
                    help="Only check the title (infra-only PRs that need no fragment).")
     c.add_argument("--changes-dir", default=".changes")

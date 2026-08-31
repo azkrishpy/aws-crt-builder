@@ -73,9 +73,8 @@ def _run_render_workflow(repo, trigger_sha, docs_branch="docs"):
     else:
         git(repo, "checkout", "-q", docs_branch)
 
-    # Cherry-pick the merge onto docs. Disable rename detection so that a
-    # rollup's preview/ -> latest/ moves on docs do not confuse git into
-    # redirecting a fresh preview fragment to a latest/ path.
+    # -Xno-renames stops a rollup's preview/->latest/ moves being seen as
+    # renames of a fresh fragment.
     r = subprocess.run(
         ["git", "cherry-pick", "-x", "--allow-empty",
          "--strategy=recursive", "-Xno-renames", trigger_sha],
@@ -86,10 +85,7 @@ def _run_render_workflow(repo, trigger_sha, docs_branch="docs"):
             ["git", "diff", "--name-only", "--diff-filter=U"],
             cwd=repo, capture_output=True, text=True,
         ).stdout.split()))
-        # CHANGELOG.md is fully derived from .changes/, so a conflict in it
-        # carries no information: take the incoming side and let the render
-        # below overwrite it. This is the normal case when replaying a release
-        # commit, whose CHANGELOG.md has no [Preview] block while docs' does.
+        # Derived file; the render below rewrites it regardless.
         if unmerged == ["CHANGELOG.md"]:
             subprocess.run(["git", "checkout", "--theirs", "CHANGELOG.md"], cwd=repo)
             git(repo, "add", "CHANGELOG.md")
@@ -106,9 +102,7 @@ def _run_render_workflow(repo, trigger_sha, docs_branch="docs"):
                 f"cherry-pick failed for {trigger_sha}\nstderr={r.stderr}\nstatus={status}"
             )
 
-    # docs' CHANGELOG.md is always the full docs-shaped render (with the
-    # [Preview] block). Rendering unconditionally is cheaper than deciding
-    # whether this commit touched fragments, and it self-heals any drift.
+    # Unconditional: a no-op render stages nothing and amends nothing.
     run([sys.executable, str(CHANGELOG_PY), "render"], cwd=repo)
     git(repo, "add", "CHANGELOG.md")
     r = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo)
@@ -209,8 +203,7 @@ def test_docs_replays_source_only_merges_without_render(scratch_repo):
 
 
 def _simulate_release(repo, version, date, bump, highlights=""):
-    """Simulate cut-release.sh: roll the changelog up into the VERSION-bump
-    commit, on main. Rollup renders without a [Preview] block there."""
+    """Simulate cut-release.sh: rollup inside the VERSION-bump commit on main."""
     git(repo, "checkout", "-q", "main")
     argv = [sys.executable, str(CHANGELOG_PY), "rollup",
             "--version", version, "--date", date, "--bump", bump]
@@ -256,8 +249,7 @@ def test_main_changelog_has_no_preview_block(scratch_repo):
 
 
 def test_docs_keeps_empty_preview_after_release(scratch_repo):
-    """docs always carries a [Preview] block. Right after a release it is
-    empty, and the next fragment-bearing merge repopulates it."""
+    """docs keeps an empty [Preview] after a release, repopulated on next merge."""
     repo = scratch_repo
     sha = _simulate_pr_merge(repo, 843, "feat: SSO sign-in")
     _run_render_workflow(repo, sha)
@@ -283,8 +275,7 @@ def test_docs_keeps_empty_preview_after_release(scratch_repo):
 
 
 def test_full_flow_with_release_rollup(scratch_repo):
-    """End-to-end: merges → 0.29.0 → merges → 0.29.1 → minor bump → 0.30.0,
-    with every rollup landing on main and replaying onto docs."""
+    """End-to-end: 0.29.0 → 0.29.1 → 0.30.0, rollups on main, replayed to docs."""
     repo = scratch_repo
     for pr, title in [
         (843, "feat: SSO sign-in"),

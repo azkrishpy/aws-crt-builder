@@ -53,19 +53,13 @@ jobs:
             git checkout -B "${DOCS_BRANCH}" "${PARENT}"
           fi
 
-          # Replay the merge commit onto docs. -x records the origin sha in
-          # the message; --allow-empty tolerates identical trees;
-          # -Xno-renames avoids false renames when docs has moved fragments
-          # from preview/ into a released <version>/ dir via a prior rollup.
+          # -Xno-renames stops a rollup's preview/->latest/ moves being seen
+          # as renames of a fresh fragment.
           if ! git cherry-pick -x --allow-empty \
                  --strategy=recursive -Xno-renames "${TRIGGER_SHA}"; then
             UNMERGED=$(git diff --name-only --diff-filter=U | sort -u)
             if [[ "$UNMERGED" == "CHANGELOG.md" ]]; then
-              # CHANGELOG.md is derived entirely from .changes/, so a conflict
-              # in it carries no information. Take the incoming side; the
-              # unconditional render below rewrites the file anyway. This is
-              # the expected case when replaying a release commit, whose
-              # CHANGELOG.md has no [Preview] block while docs' does.
+              # Derived file; the render below rewrites it regardless.
               echo "Auto-resolving CHANGELOG.md conflict (derived file)."
               git checkout --theirs CHANGELOG.md
               git add CHANGELOG.md
@@ -78,10 +72,7 @@ jobs:
             fi
           fi
 
-          # docs' CHANGELOG.md is always the full docs-shaped render, including
-          # the [Preview] block. Rendering unconditionally is cheaper than
-          # working out whether this commit touched fragments, and it self-heals
-          # any drift. A no-op render leaves nothing staged and amends nothing.
+          # Unconditional: a no-op render stages nothing and amends nothing.
           python3 "${CHANGELOG_PY}" render
           git add CHANGELOG.md
           if ! git diff --cached --quiet; then

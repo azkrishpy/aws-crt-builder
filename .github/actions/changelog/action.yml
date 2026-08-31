@@ -61,8 +61,7 @@ runs:
         SCRIPT="${GITHUB_ACTION_PATH}/scripts/changelog.py"
         case "${MODE}" in
           check)
-            # TITLE comes in as an env var, never interpolated into this script,
-            # so a crafted PR title cannot inject shell.
+            # TITLE stays an env var; interpolating it here would be injectable.
             EXTRA=()
             if [[ -n "${TITLE}" ]]; then EXTRA+=(--title "${TITLE}"); fi
             if [[ "${REQUIRE_FRAGMENT}" == "false" ]]; then EXTRA+=(--no-fragment); fi
