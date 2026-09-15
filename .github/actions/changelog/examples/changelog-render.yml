@@ -1,16 +1,30 @@
-# Replay every merge on the docs branch so docs mirrors main. If the
-# merge added or modified a preview fragment, also regenerate CHANGELOG.md
-# and fold it into the same docs commit — one commit on docs per merge on
-# main. Main stays clean of bot commits.
+# Rebuild the `docs` branch from main and add exactly ONE commit that renders
+# CHANGELOG.md with the unreleased [Preview] block.
+#
+#   docs = main's history, verbatim, plus one bot commit on top.
+#
+# docs is 100% derived, so it is rebuilt from scratch and force-pushed on every
+# push to main. There is no merge and no cherry-pick, therefore no conflict can
+# occur and no human is ever asked to intervene. Any commit made on docs by
+# hand is discarded on the next push to main -- do not commit here.
+#
+# Main never gets a bot commit: its CHANGELOG.md is written only by the release
+# rollup, inside the release commit.
 
 name: Changelog Render
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
+# One run per repo. Safe to cancel a superseded run: this workflow renders
+# origin/main as fetched INSIDE the run, never the SHA that triggered it, so a
+# newer run always produces the same or a newer result. (The old cherry-pick
+# model needed cancel-in-progress: false because each run replayed one specific
+# commit, so a cancelled run dropped that commit from docs forever.)
 concurrency:
   group: changelog-docs
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -19,64 +33,77 @@ jobs:
   render:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 1 is enough. The only commit created here has main's tip
+      # as its parent, and the remote already has that object.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          ssh-key: ${{ secrets.CHANGELOG_DEPLOY_KEY }}
+          fetch-depth: 1
 
-      # The render script lives in aws-crt-builder, not in this repo.
+      # changelog.py lives in aws-crt-builder, not in this repo. Pin the ref in
+      # production: `main` means a change there reaches this docs branch at once.
       - uses: actions/checkout@v4
         with:
           repository: awslabs/aws-crt-builder
           ref: main
           path: .crt-builder
+          persist-credentials: false
 
-      - name: Replay merge onto docs, refresh preview
+      - name: Rebuild docs from main
         env:
-          TRIGGER_SHA: ${{ github.sha }}
           DOCS_BRANCH: docs
+          CHANGES_DIR: .changes
+          CHANGELOG: CHANGELOG.md
           CHANGELOG_PY: ${{ github.workspace }}/.crt-builder/.github/actions/changelog/scripts/changelog.py
         run: |
           set -euo pipefail
 
-          git config user.name  "aws-sdk-common-runtime-bot"
+          git config user.name  "aws-crt-bot"
           git config user.email "aws-sdk-common-runtime@amazon.com"
 
-          # Ensure docs exists locally, tracking origin's copy if remote has it.
-          if git ls-remote --exit-code --heads origin "${DOCS_BRANCH}" >/dev/null 2>&1; then
-            git fetch origin "${DOCS_BRANCH}:${DOCS_BRANCH}"
-            git checkout "${DOCS_BRANCH}"
-          else
-            # First run: branch docs from main's parent of TRIGGER_SHA so the
-            # first cherry-pick is meaningful (it introduces the changes).
-            PARENT=$(git rev-parse "${TRIGGER_SHA}^")
-            git checkout -B "${DOCS_BRANCH}" "${PARENT}"
+          git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main'
+
+          # Not onboarded yet: never invent a CHANGELOG.md or a docs branch.
+          # `changelog.py render` happily writes an empty stub when .changes/
+          # does not exist, which would fabricate both.
+          if ! git cat-file -e "origin/main:${CHANGES_DIR}" 2>/dev/null; then
+            echo "no ${CHANGES_DIR}/ on main; nothing to render"
+            exit 0
           fi
 
-          # -Xno-renames stops a rollup's preview/->latest/ moves being seen
-          # as renames of a fresh fragment.
-          if ! git cherry-pick -x --allow-empty \
-                 --strategy=recursive -Xno-renames "${TRIGGER_SHA}"; then
-            UNMERGED=$(git diff --name-only --diff-filter=U | sort -u)
-            if [[ "$UNMERGED" == "CHANGELOG.md" ]]; then
-              # Derived file; the render below rewrites it regardless.
-              echo "Auto-resolving CHANGELOG.md conflict (derived file)."
-              git checkout --theirs CHANGELOG.md
-              git add CHANGELOG.md
-              GIT_EDITOR=true git cherry-pick --continue
+          for attempt in 1 2 3; do
+            git fetch --quiet --force origin \
+              "+refs/heads/${DOCS_BRANCH}:refs/remotes/origin/${DOCS_BRANCH}" \
+              2>/dev/null || true
+            # An EMPTY lease means "must not exist yet" -- the first-run case.
+            LEASE="$(git rev-parse --quiet --verify \
+                       "refs/remotes/origin/${DOCS_BRANCH}" || true)"
+
+            # Discard whatever docs held. main is the sole source of truth.
+            git checkout --quiet -B "${DOCS_BRANCH}" origin/main
+
+            python3 "${CHANGELOG_PY}" render \
+              --changes-dir "${CHANGES_DIR}" --changelog "${CHANGELOG}"
+            git add -A -- "${CHANGELOG}"
+
+            if git diff --cached --quiet; then
+              echo "render matches main byte-for-byte; docs == main"
             else
-              echo "ERROR: cherry-pick conflict in: ${UNMERGED:-<none>}" >&2
-              echo "       Manual intervention required." >&2
-              git cherry-pick --abort || true
-              exit 1
+              git commit --quiet \
+                -m "docs: render ${CHANGELOG} including unreleased entries" \
+                -m "Derived from ${CHANGES_DIR}/ at $(git rev-parse --short origin/main). Do not edit: this branch is rebuilt from main and force-pushed on every push, so any commit made here is discarded."
             fi
-          fi
 
-          # Unconditional: a no-op render stages nothing and amends nothing.
-          python3 "${CHANGELOG_PY}" render
-          git add CHANGELOG.md
-          if ! git diff --cached --quiet; then
-            git commit --amend --no-edit
-          fi
+            # --force-with-lease is a compare-and-swap: it refuses if docs moved
+            # since the fetch above, so a racing run cannot be clobbered.
+            if git push --quiet --force-with-lease="${DOCS_BRANCH}:${LEASE}" \
+                 origin "HEAD:refs/heads/${DOCS_BRANCH}"; then
+              echo "pushed ${DOCS_BRANCH} on attempt ${attempt}"
+              exit 0
+            fi
 
-          git push origin "${DOCS_BRANCH}"
+            echo "::warning::${DOCS_BRANCH} moved under us; retrying (${attempt}/3)"
+            git fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main'
+          done
+
+          echo "::error::could not push ${DOCS_BRANCH} after 3 attempts"
+          exit 1

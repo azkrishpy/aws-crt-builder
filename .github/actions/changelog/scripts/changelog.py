@@ -28,8 +28,15 @@ PREVIEW_START = "<!-- changelog:preview:start -->"
 PREVIEW_END = "<!-- changelog:preview:end -->"
 
 TITLE_RE = re.compile(
-    r"^(feat|fix|docs?|chore|revert)(?:\([^)]+\))?:\s*(.+)$", re.IGNORECASE
+    r"^(feat|fix|docs?|chore|revert)(?:\([^)]+\))?!?:\s*(.+)$", re.IGNORECASE
 )
+# Reverts are the one LENIENT case: GitHub's Revert button and `git revert`
+# generate the subject themselves, so the author does not control it. git
+# emits `Revert "<subject>"`, and `Reapply "<subject>"` when reverting a
+# revert (git-revert(1) DISCUSSION). Anchored at the start only, so a
+# maintainer-appended ` (#123)` still passes. A HAND-TYPED revert title is in
+# the author's control and still has to use `revert: <summary>`.
+REVERT_TITLE_RE = re.compile(r'^(?:revert|reapply)\s+"(.+)"', re.IGNORECASE)
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 MINOR_LINE_RE = re.compile(r"^(\d+)\.(\d+)\.x$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -38,13 +45,19 @@ ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # ---------- parsing / schema ----------
 
 def parse_title(title):
-    m = TITLE_RE.match(title.strip())
-    if not m:
-        return None, title.strip()
-    t = m.group(1).lower()
-    if t == "docs":
-        t = "doc"
-    return t, m.group(2).strip()
+    title = title.strip()
+    m = TITLE_RE.match(title)
+    if m:
+        t = m.group(1).lower()
+        if t == "docs":
+            t = "doc"
+        return t, m.group(2).strip()
+    m = REVERT_TITLE_RE.match(title)
+    if m:
+        # Normalise to `Revert: <subject>` so render_entry does not append a
+        # period after a closing quote.
+        return "revert", "Revert: {}".format(m.group(1).strip())
+    return None, title
 
 
 REQUIRED_FRAGMENT = {"pr", "type", "summary", "url"}
@@ -303,47 +316,58 @@ def check_title(title):
         f"       expected: '<type>: <customer-facing summary>'\n"
         f"       type must be one of: {' | '.join(sorted(VALID_TYPES))}\n"
         f"       an optional scope is allowed, e.g. 'fix(io): Handle EINTR.'\n"
+        f"       append '!' to flag a breaking change, e.g. 'feat(io)!: Drop X.'\n"
+        f"       revert PRs may keep the generated 'Revert \"<original title>\"'.\n"
         f"       the type drives the changelog section the entry lands in."
     )
 
 
+def check_fragment(changes_dir, pr):
+    """Return an error string if PR #pr has no valid fragment, else None."""
+    frag = Path(changes_dir) / "preview" / f"{pr}.json"
+    if not frag.exists():
+        return (
+            f"ERROR: no changelog fragment for PR #{pr}.\n"
+            f"       expected: {frag}\n"
+            f"       generate the fragment JSON (see PR template) and commit it,\n"
+            f"       or apply the `skip-changelog` label for CI-only / pure-infra PRs."
+        )
+    errs = validate_fragment(frag)
+    if errs:
+        return "\n".join(errs)
+    declared_pr = json.loads(frag.read_text()).get("pr")
+    if declared_pr != pr:
+        return f"ERROR: {frag} declares pr={declared_pr} but this PR is #{pr}"
+    return None
+
+
 def cmd_check(args):
-    """Gate a PR: title convention always, fragment unless waived."""
+    """Gate a PR: title convention always, fragment unless waived.
+
+    Both checks always run and both errors are reported in one pass -- a
+    contributor who broke both should not have to fix them serially across two
+    CI cycles.
+    """
+    failed = False
     if args.title is not None:
         err = check_title(args.title)
         if err:
             print(err, file=sys.stderr)
-            return 1
-        print("OK: PR title follows the '<type>: summary' convention")
+            failed = True
+        else:
+            print("OK: PR title follows the '<type>: summary' convention")
 
-    if not args.require_fragment:
+    if args.require_fragment:
+        err = check_fragment(args.changes_dir, args.pr)
+        if err:
+            print(err, file=sys.stderr)
+            failed = True
+        else:
+            print(f"OK: fragment for #{args.pr} is present and valid")
+    else:
         print(f"OK: fragment not required for #{args.pr} (title-only check)")
-        return 0
 
-    frag = Path(args.changes_dir) / "preview" / f"{args.pr}.json"
-    if not frag.exists():
-        print(
-            f"ERROR: no changelog fragment for PR #{args.pr}.\n"
-            f"       expected: {frag}\n"
-            f"       generate the fragment JSON (see PR template) and commit it,\n"
-            f"       or apply the `skip-changelog` label for CI-only / pure-infra PRs.",
-            file=sys.stderr,
-        )
-        return 1
-    errs = validate_fragment(frag)
-    if errs:
-        for e in errs:
-            print(e, file=sys.stderr)
-        return 1
-    declared_pr = json.loads(frag.read_text()).get("pr")
-    if declared_pr != args.pr:
-        print(
-            f"ERROR: {frag} declares pr={declared_pr} but this PR is #{args.pr}",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"OK: fragment for #{args.pr} is present and valid")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_render(args):

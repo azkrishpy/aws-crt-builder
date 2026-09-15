@@ -591,3 +591,180 @@ def test_check_title_error_names_valid_types(tmp_path):
     err = cl.check_title("nope")
     for t in ("feat", "fix", "doc", "chore", "revert"):
         assert t in err
+
+
+# ---------- breaking-change marker (`!`) ----------
+
+@pytest.mark.parametrize("title,typ", [
+    ("feat!: Drop the v1 API.", "feat"),
+    ("fix!: Rename aws_foo_new.", "fix"),
+    ("feat(io)!: Drop the legacy socket path.", "feat"),
+    ("chore(deps)!: Require CMake 3.20.", "chore"),
+    ("revert!: Undo #843.", "revert"),
+])
+def test_breaking_marker_accepted_and_maps_to_bare_type(title, typ):
+    """`!` is Conventional Commits' breaking flag. It is accepted and does not
+    change the changelog section -- the ABI label carries severity."""
+    assert cl.check_title(title) is None
+    assert cl.parse_title(title)[0] == typ
+
+
+def test_breaking_marker_does_not_leak_into_summary():
+    assert cl.parse_title("feat(io)!: Drop X.") == ("feat", "Drop X.")
+
+
+@pytest.mark.parametrize("title", [
+    "feat!x: Drop the v1 API.",
+    "feat(io)! Drop the v1 API.",
+    "!: Drop the v1 API.",
+])
+def test_malformed_breaking_marker_still_rejected(title):
+    assert cl.check_title(title) is not None
+
+
+# ---------- revert leniency (D7: titles we do not control) ----------
+
+@pytest.mark.parametrize("title", [
+    # GitHub's Revert button / `git revert` output, verbatim from the repos.
+    'Revert "Fix CI issues"',                                        # aws-c-http#542
+    'Revert "Skip test on Apple"',                                   # aws-c-s3#611
+    'Revert "[s3_meta_request]: Retry on ExpiredToken"',              # aws-c-s3#518
+    'Revert "add compiler flag `-msse2` for aws-lc on x86 (#291)"',   # builder#298
+    # Unbalanced quotes from a nested revert: aws-c-cal#195, as merged.
+    'Revert "Revert "Implement runtime check on libcrypto linkage (#186)"',
+    # git >= 2.42 renames a revert-of-a-revert to Reapply (git-revert(1)).
+    'Reapply "feat: Add SSO sign-in. (#843)"',
+    # Case tolerance, and a maintainer-appended PR number.
+    'revert "Fix CI issues"',
+    'Revert "Fix CI issues" (#543)',
+])
+def test_generated_revert_titles_accepted(title):
+    assert cl.check_title(title) is None
+    assert cl.parse_title(title)[0] == "revert"
+
+
+def test_revert_title_summary_is_normalised_for_render():
+    """Strip the quote wrapper so render_entry does not append a period after
+    the closing quote."""
+    typ, summary = cl.parse_title('Revert "Fix CI issues"')
+    assert (typ, summary) == ("revert", "Revert: Fix CI issues")
+    assert cl.render_entry({"pr": 42, "type": "revert", "summary": summary}) \
+        == "- Revert: Fix CI issues. (#42)"
+
+
+def test_revert_fragment_lands_in_maintenance():
+    assert cl.categorize({"type": "revert"}) == "Maintenance"
+
+
+@pytest.mark.parametrize("title", [
+    # Hand-written reverts ARE in the author's control: use `revert:`.
+    "Revert to commit 4c48e60",          # aws-c-io#787, as merged
+    "Revert error code ordering",        # aws-c-io#723, as merged
+    "Revert win TLS 1.3",                # aws-c-io#712, as merged
+    "revert lc pin",                     # aws-c-cal#190, as merged
+    "Revert",
+    'Revert "',
+])
+def test_freeform_revert_titles_still_rejected(title):
+    err = cl.check_title(title)
+    assert err is not None
+    assert 'Revert "<original title>"' in err
+
+
+def test_conventional_revert_prefix_still_accepted():
+    assert cl.parse_title("revert: Undo #843.") == ("revert", "Undo #843.")
+
+
+# ---------- the wider Conventional Commits type set stays out ----------
+
+@pytest.mark.parametrize("title", [
+    "build: Bump the CMake floor.",
+    "ci: Add an OpenBSD job.",
+    "perf: Halve the hash cost.",
+    "refactor: Split the channel loop.",
+    "test: Deflake the TLS suite.",
+    "style: Run clang-format.",
+])
+def test_extra_conventional_types_rejected(title):
+    """Every accepted type must map to a CHANGELOG section; these six have no
+    mapping, so they are rejected with the valid set spelled out."""
+    err = cl.check_title(title)
+    assert err is not None
+    assert "chore | doc | feat | fix | revert" in err
+
+
+# ---------- title and fragment fail independently, in one run ----------
+
+def test_both_failures_reported_in_one_run(tmp_path, capsys):
+    (tmp_path / ".changes" / "preview").mkdir(parents=True)
+    rc = cl.main([
+        "check", "--pr", "42", "--title", "Fix wrong libdir on some platforms",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "PR title does not start with a recognised type" in err
+    assert "no changelog fragment for PR #42" in err
+
+
+def test_title_failure_alone_names_only_the_title(tmp_path, capsys):
+    _seed(tmp_path, 42, "fix: Something.")
+    rc = cl.main([
+        "check", "--pr", "42", "--title", "Fix wrong libdir",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ])
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "PR title does not start with a recognised type" in cap.err
+    assert "no changelog fragment" not in cap.err
+    assert "OK: fragment for #42 is present and valid" in cap.out
+
+
+def test_fragment_failure_alone_names_only_the_fragment(tmp_path, capsys):
+    (tmp_path / ".changes" / "preview").mkdir(parents=True)
+    rc = cl.main([
+        "check", "--pr", "42", "--title", "fix(io): Handle EINTR.",
+        "--changes-dir", str(tmp_path / ".changes"),
+    ])
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "no changelog fragment for PR #42" in cap.err
+    assert "does not start with a recognised type" not in cap.err
+    assert "OK: PR title follows" in cap.out
+
+
+def test_check_fragment_helper_returns_none_when_valid(tmp_path):
+    _seed(tmp_path, 7, "fix: Something.")
+    assert cl.check_fragment(str(tmp_path / ".changes"), 7) is None
+
+
+def test_check_fragment_helper_flags_pr_mismatch(tmp_path):
+    _seed(tmp_path, 7, "fix: Something.")
+    (tmp_path / ".changes" / "preview" / "7.json").write_text(
+        json.dumps({"pr": 8, "type": "fix", "summary": "s",
+                    "url": "u", "notes": ""})
+    )
+    err = cl.check_fragment(str(tmp_path / ".changes"), 7)
+    assert err is not None and "declares pr=8" in err
+
+
+# ---------- dependabot: exempt by prefixing its commits, not by title shape ----------
+
+def test_dependabot_prefixed_title_passes():
+    """`.github/dependabot.yml` with commit-message.prefix: chore and
+    include: scope makes dependabot emit a passing title with no code change
+    here, typed `chore`, which is hidden from the customer changelog."""
+    typ, summary = cl.parse_title(
+        "chore(deps): bump @actions/core from 1.10.1 to 1.11.0"
+    )
+    assert typ == "chore"
+    assert summary == "bump @actions/core from 1.10.1 to 1.11.0"
+    assert typ in cl.HIDDEN_TYPES_CUSTOMER
+
+
+def test_bare_bump_title_is_rejected_for_humans_too():
+    """A `^Bump ` exemption would also exempt human PRs like
+    awslabs/aws-c-common#1139 'Bump the minimum stack size to at least 1MB',
+    which is a real behaviour change. So there is no title-shape exemption."""
+    assert cl.check_title("Bump the minimum stack size to at least 1MB") is not None
+    assert cl.check_title("Bump actions/checkout from 4 to 7") is not None
