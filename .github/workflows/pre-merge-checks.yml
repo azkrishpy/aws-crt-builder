@@ -137,7 +137,7 @@ jobs:
 
       - name: Apply the verdict label
         # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/abi-label@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/abi-label@forktest/builder
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
@@ -206,7 +206,7 @@ jobs:
       - name: Check the PR title and the fragment
         id: check
         # TODO: pin back to @main once the changelog action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/changelog@forktest/builder
         with:
           mode: check
           pr: ${{ github.event.pull_request.number }}
@@ -221,7 +221,7 @@ jobs:
       - name: Seed a fragment template
         if: ${{ steps.check.outputs.reason == 'missing-fragment' }}
         # TODO: pin back to @main once the changelog action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/changelog@forktest/builder
         with:
           mode: seed
           pr: ${{ github.event.pull_request.number }}
@@ -288,7 +288,7 @@ jobs:
     steps:
       - name: Decide and publish the gate status
         # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/pre-merge-gate@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/pre-merge-gate@forktest/builder
         with:
           needs: ${{ toJSON(needs) }}
           abi-result: ${{ needs['abi-compat'].result }}
