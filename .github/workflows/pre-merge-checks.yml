@@ -85,14 +85,6 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.CRT_CI_ROLE_ARN }}
-          # Not an input: check-abi hardcodes a us-east-1 ECR registry, and
-          # `docker login` would present a token scoped to the wrong region.
-          aws-region: us-east-1
-
       - name: Checkout the PR head
         uses: actions/checkout@v4
         with:
@@ -124,20 +116,17 @@ jobs:
           echo "Comparing ${BASE_SHA} (merge base) -> $(git rev-parse HEAD) (PR head)"
           echo "base-sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Check ABI
+      - name: Check ABI (STUB for fork testing -- reads .forktest-verdict)
         id: check
-        uses: awslabs/aws-crt-builder/.github/actions/check-abi@main
-        with:
-          lib-name: ${{ inputs.lib-name }}
-          builder-version: ${{ inputs.builder-version }}
-          builder-source: ${{ inputs.builder-source }}
-          # Passing base-ref makes the action compare exactly these two commits
-          # and skip its own labelling, which the next step does instead.
-          base-ref: ${{ steps.refs.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          V="$(cat .forktest-verdict 2>/dev/null || echo patch)"
+          echo "stub ABI verdict: ${V}"
+          echo "label=${V}" >> "$GITHUB_OUTPUT"
 
       - name: Apply the verdict label
         # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/abi-label@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/abi-label@forktest/builder-stub
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
@@ -206,7 +195,7 @@ jobs:
       - name: Check the PR title and the fragment
         id: check
         # TODO: pin back to @main once the changelog action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/changelog@forktest/builder-stub
         with:
           mode: check
           pr: ${{ github.event.pull_request.number }}
@@ -221,7 +210,7 @@ jobs:
       - name: Seed a fragment template
         if: ${{ steps.check.outputs.reason == 'missing-fragment' }}
         # TODO: pin back to @main once the changelog action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/changelog@forktest/builder-stub
         with:
           mode: seed
           pr: ${{ github.event.pull_request.number }}
@@ -288,7 +277,7 @@ jobs:
     steps:
       - name: Decide and publish the gate status
         # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/pre-merge-gate@feat/pre-merge-checks
+        uses: azkrishpy/aws-crt-builder/.github/actions/pre-merge-gate@forktest/builder-stub
         with:
           needs: ${{ toJSON(needs) }}
           abi-result: ${{ needs['abi-compat'].result }}
