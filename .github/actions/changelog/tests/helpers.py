@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import changelog  # noqa: E402
+import changelog
+import render  # noqa: E402
 
 
 def _changes(tmp_path):
@@ -37,3 +38,9 @@ def _preview(tmp_path, name, text):
     p = tmp_path / ".changes" / "preview" / name
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
+
+
+def _render(tmp_path):
+    text = render.render_root_changelog(tmp_path / ".changes")
+    (tmp_path / "CHANGELOG.md").write_text(text)
+    return text

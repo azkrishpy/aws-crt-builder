@@ -39,6 +39,9 @@ REVERT_TITLE_RE = re.compile(r'^revert\s+"(.+)"\s*$', re.IGNORECASE)
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
+LINE_FILE_RE = re.compile(r"^(\d+)\.(\d+)\.x\.md$")
+
+
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -98,6 +101,68 @@ def parse_semver(s):
 
 def fmt_semver(t):
     return ".".join(str(x) for x in t)
+
+
+# ---------- fragment IO ----------
+
+def _load_valid_fragment(path):
+    errs = validate_fragment(path)
+    data = {}
+    if not errs:
+        data = json.loads(Path(path).read_text())
+        stem = Path(path).stem
+        if stem.isdigit() and data.get("pr") != int(stem):
+            errs.append(f"{path}: pr {data.get('pr')!r} does not match the filename")
+    if errs:
+        for e in errs:
+            print(f"WARN: skipping {e}", file=sys.stderr)
+        return None
+    return data
+
+
+def load_dir(d):
+    """Every valid fragment in one directory; invalid ones warn and drop out."""
+    d = Path(d)
+    if not d.exists():
+        return []
+    return [f for f in map(_load_valid_fragment, sorted(d.glob("*.json")))
+            if f is not None]
+
+
+def releases(changes_dir):
+    """Released fragments grouped as (version, fragments), newest release first."""
+    by_version = {}
+    for frag in load_dir(Path(changes_dir) / "released"):
+        by_version.setdefault(str(frag.get("version", "")), []).append(frag)
+    return sorted(((v, f) for v, f in by_version.items() if SEMVER_RE.match(v)),
+                  key=lambda kv: parse_semver(kv[0]), reverse=True)
+
+
+def frozen_lines(changes_dir):
+    """Archive files for closed minor lines, newest line first."""
+    d = Path(changes_dir)
+    if not d.exists():
+        return []
+    files = [f for f in d.iterdir() if LINE_FILE_RE.match(f.name)]
+    return sorted(files, key=lambda f: _line_of(f.name), reverse=True)
+
+
+def _line_of(name):
+    return tuple(int(x) for x in LINE_FILE_RE.match(name).groups())
+
+
+def audit_released(changes_dir):
+    """Report released fragments that would not render. True if any did.
+
+    A released fragment is a published entry: if it fails the schema or lost its
+    version stamp, it silently vanishes from the regenerated file. Every caller
+    that writes a changelog stops instead.
+    """
+    errs = [e for f in sorted((Path(changes_dir) / "released").glob("*.json"))
+            for e in validate_fragment(f, released=True)]
+    for e in errs:
+        _err(e)
+    return bool(errs)
 
 
 # ---------- commands ----------
