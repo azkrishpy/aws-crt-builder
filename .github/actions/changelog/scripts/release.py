@@ -1,10 +1,27 @@
 """Cutting a release: what a version is allowed to be, stamping fragments as
 released, and archiving a minor line that will take no more."""
 
-from fragments import ISO_DATE_RE, _err, audit_released, load_dir, parse_semver
+from fragments import ISO_DATE_RE, _err, audit_released, load_dir, parse_semver, releases
 from pathlib import Path
-from render import render_root_changelog
+from render import render_line_archive, render_root_changelog
 import json
+
+
+def _freeze(changes, line, groups):
+    """Archive a closing minor line to one file and drop its fragments.
+
+    Re-runnable: a crash between writing the archive and pruning leaves both, and
+    the next rollup rewrites the archive from the same fragments and finishes.
+    """
+    archive = changes / f"{line[0]}.{line[1]}.x.md"
+    closing = [(v, f) for v, f in groups if parse_semver(v)[:2] == line]
+    archive.write_text(render_line_archive(archive.stem, closing))
+    # The archive is the record from here on. Keeping the fragments too would
+    # add one file per merged pull request forever, for nothing that reads them;
+    # `git log -- .changes` still has every one.
+    for _version, frags in closing:
+        for frag in frags:
+            (changes / "released" / f"{frag['pr']}.json").unlink()
 
 
 def _release_preview(changes, version, date, minor_prs):
@@ -24,7 +41,7 @@ def _release_preview(changes, version, date, minor_prs):
 
 
 def cmd_rollup(args):
-    """Move every preview fragment into released/, stamped with this release."""
+    """Two flows: a patch accretes into released/; a minor archives the old line."""
     changes = Path(args.changes_dir)
     if audit_released(changes):
         return 2
@@ -50,9 +67,16 @@ def cmd_rollup(args):
              f"{preview_dir} are invalid (see the warnings above); fix them first")
         return 2
 
+    groups = releases(changes)
+
+    current = parse_semver(groups[0][0])[:2] if groups else None
+    bump = "patch" if current == new[:2] else "minor"
+    if bump == "minor" and current is not None:
+        _freeze(changes, current, groups)
+
     _release_preview(changes, args.version, args.date,
                      {int(p) for p in args.minor_prs.split(",") if p.strip()})
     Path(args.changelog).write_text(
         render_root_changelog(changes, preview=False, docs_branch=args.docs_branch))
-    print(f"rolled up {len(preview)} fragment(s) into {args.version}")
+    print(f"rolled up {len(preview)} fragment(s) into {args.version} ({bump})")
     return 0

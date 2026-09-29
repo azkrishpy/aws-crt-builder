@@ -100,6 +100,13 @@ def render_root_changelog(changes_dir, preview=True, docs_branch="docs"):
     return "\n".join(body).rstrip() + "\n"
 
 
+def render_line_archive(line, groups):
+    """A self-contained file for a minor line that will take no more releases."""
+    body = [f"# Changelog — {line}", "",
+            "Current releases are in the [top-level changelog](../CHANGELOG.md).", ""]
+    return "\n".join(body + _release_sections(groups, ARCHIVE_UP)).rstrip() + "\n"
+
+
 def cmd_render(args):
     if audit_released(args.changes_dir):
         return 2
