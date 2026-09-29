@@ -24,6 +24,12 @@ BREAKING_SECTION = "Possible Breaking Changes"
 assert set(CATEGORY) | {"chore"} == VALID_TYPES
 
 
+# Release-time fields. The author writes none of them: `impact` decides whether
+# an entry lands under Possible Breaking Changes, so accepting it from a pull
+# request would let that pull request classify itself.
+STAMPED = ("version", "date", "impact")
+
+
 TITLE_RE = re.compile(
     r"^(feat|fix|chore|revert)(?:\([^)]+\))?:\s*(.+)$", re.IGNORECASE
 )

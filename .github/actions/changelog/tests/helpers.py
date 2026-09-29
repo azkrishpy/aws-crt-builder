@@ -67,3 +67,26 @@ def _released(tmp_path, pr, version, date="2026-01-01", **over):
     p = d / f"{pr}.json"
     p.write_text(json.dumps(frag))
     return p
+
+
+def _paths(tmp_path, *entries):
+    f = tmp_path / "paths.tsv"
+    f.write_text("".join(f"{st}\t{p}\n" for st, p in entries))
+    return str(f)
+
+
+def _check(tmp_path, pr, title, bot=""):
+    args = ["check", "--pr", str(pr), "--title", title,
+            "--changes-dir", _changes(tmp_path)]
+    if bot:
+        args += ["--bot-author", bot]
+    return changelog.main(args)
+
+
+def _check_paths(tmp_path, pr, title, paths_file):
+    return changelog.main([
+        "check", "--pr", str(pr), "--title", title,
+        "--changes-dir", _changes(tmp_path),
+        "--changed-paths-file", paths_file,
+        "--changes-prefix", ".changes",
+    ])
