@@ -214,7 +214,6 @@ jobs:
           mode: seed
           pr: ${{ github.event.pull_request.number }}
           title: ${{ github.event.pull_request.title }}
-          url: ${{ github.event.pull_request.html_url }}
           # Outside $RUNNER_TEMP/changes, so it is never mistaken for the
           # author's own fragment.
           out: ${{ runner.temp }}/seed-template.json
