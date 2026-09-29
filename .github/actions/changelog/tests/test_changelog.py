@@ -195,6 +195,13 @@ def test_rollup_major_archives_the_current_minor_line(tmp_path):
     assert {p.name for p in (changes / "released").glob("*.json")} == {"2.json"}
 
 
+def test_rollup_rejects_duplicate_version(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.0", "2026-08-01")
+    _seed(tmp_path, 2, "fix: b")
+    assert _rollup(tmp_path, "2.0.0", "2026-08-02") == 2
+
+
 def test_rollup_bad_semver_rejected(tmp_path):
     _seed(tmp_path, 1, "feat: a")
     assert _rollup(tmp_path, "notaversion", "2026-01-01") == 2
@@ -203,6 +210,13 @@ def test_rollup_bad_semver_rejected(tmp_path):
 def test_rollup_bad_date_rejected(tmp_path):
     _seed(tmp_path, 1, "feat: a")
     assert _rollup(tmp_path, "1.0.0", "not-a-date") == 2
+
+
+def test_rollup_rejects_downgrade_in_latest(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.1", "2026-08-15")
+    _seed(tmp_path, 2, "fix: b")
+    assert _rollup(tmp_path, "2.0.0", "2026-08-20") == 2
 
 
 # ---------- resilience ----------
@@ -302,6 +316,16 @@ def _preview(tmp_path, name, text):
     p = tmp_path / ".changes" / "preview" / name
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
+
+
+def test_rollup_refuses_to_reopen_a_frozen_line(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.0", "2026-01-01")
+    _seed(tmp_path, 2, "feat: b")
+    _rollup(tmp_path, "2.1.0", "2026-02-01")
+    _seed(tmp_path, 3, "fix: backport")
+    assert _rollup(tmp_path, "2.0.1", "2026-03-01") == 2
+    assert not (tmp_path / ".changes" / "latest" / "2.0.1").exists()
 
 
 # ---------- a release never silently drops a fragment ----------
@@ -481,6 +505,22 @@ def _released(tmp_path, pr, version, date="2026-01-01", **over):
     return p
 
 
+def test_rollup_refuses_a_version_belonging_to_an_archived_line(tmp_path):
+    # released/ empty beside an archive: reopening 2.0.x would split the line,
+    # since the root changelog only renders released/.
+    (tmp_path / ".changes").mkdir(parents=True)
+    (tmp_path / ".changes" / "2.0.x.md").write_text("# Changelog — 2.0.x\n")
+    _seed(tmp_path, 2, "fix: backport")
+    assert _rollup(tmp_path, "2.0.1", "2026-02-01") == 2
+
+
+def test_rollup_refuses_a_version_older_than_an_archived_line(tmp_path):
+    (tmp_path / ".changes").mkdir(parents=True)
+    (tmp_path / ".changes" / "2.0.x.md").write_text("# Changelog — 2.0.x\n")
+    _seed(tmp_path, 2, "fix: b")
+    assert _rollup(tmp_path, "1.9.9", "2026-02-01") == 2
+
+
 # ---------- degraded trees render rather than crash ----------
 
 def test_render_on_a_tree_with_no_changes_dir(tmp_path):
@@ -550,6 +590,22 @@ def test_rollup_stamps_and_moves_fragments(tmp_path):
     data = json.loads((released / "1.json").read_text())
     # The version and date live on the fragment; there is no side file.
     assert data["version"] == "1.0.0" and data["date"] == "2026-08-01"
+
+
+def test_rollup_refuses_a_version_before_the_first_changelogged_one(tmp_path):
+    # Everything before 1.0.0 shipped without fragments, so rolling one up
+    # would publish a release whose entries do not exist.
+    _seed(tmp_path, 1, "feat: a")
+    assert _rollup(tmp_path, "0.9.9", "2026-01-01") == 2
+    assert not (tmp_path / "CHANGELOG.md").exists()
+
+
+def test_rollup_refuses_a_second_fragment_for_a_released_pull_request(tmp_path):
+    # Two entries for one pull request in two releases: whichever is stale keeps
+    # rendering, because a re-render trusts what is on disk.
+    _released(tmp_path, 7, "1.0.0")
+    _seed(tmp_path, 7, "fix: same pr again")
+    assert _rollup(tmp_path, "1.0.1", "2026-02-01") == 2
 
 
 def test_rollup_finishes_an_interrupted_freeze(tmp_path):

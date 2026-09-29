@@ -25,6 +25,9 @@ BREAKING_SECTION = "Possible Breaking Changes"
 # Every accepted type either renders or is chore. Without this, narrowing the
 # type set would silently drop released entries from a regenerated file.
 assert set(CATEGORY) | {"chore"} == VALID_TYPES
+# No changelog before this. Everything earlier shipped without fragments, so a
+# rollup of it would render a release whose entries do not exist.
+FIRST_VERSION = (1, 0, 0)
 TITLE_RE = re.compile(
     r"^(feat|fix|chore|revert)(?:\([^)]+\))?:\s*(.+)$", re.IGNORECASE
 )
@@ -252,6 +255,24 @@ def cmd_seed(args):
     return 0
 def _err(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
+def _check_version(changes, new, version, groups):
+    """Error string if `version` cannot be the next release."""
+    if new < FIRST_VERSION:
+        return (f"{version} predates {fmt_semver(FIRST_VERSION)}; releases before "
+                f"that shipped without fragments and are not in the changelog")
+    if groups:
+        highest = parse_semver(groups[0][0])
+        if new <= highest:
+            return f"{version} is not newer than the released {fmt_semver(highest)}"
+    for archive in frozen_lines(changes):
+        # Reopening a closed line would split it: its archive is already written
+        # and the root changelog only renders released/.
+        line = _line_of(archive.name)
+        if new[:2] == line:
+            return f"{version} belongs to {archive.name}, which is already archived"
+        if new[:2] < line:
+            return f"{version} is older than the archived line {archive.name}"
+    return None
 def _freeze(changes, line, groups):
     """Archive a closing minor line to one file and drop its fragments.
 
@@ -316,6 +337,20 @@ def cmd_rollup(args):
         return 2
 
     groups = releases(changes)
+    err = _check_version(changes, new, args.version, groups)
+    if err:
+        _err(err)
+        return 2
+
+    shipped = {f["pr"]: v for v, frags in groups for f in frags}
+    dupes = sorted(f["pr"] for f in preview if f["pr"] in shipped)
+    if dupes:
+        # Two entries for one pull request, in two releases. Whichever is stale
+        # would keep rendering, because a re-render trusts what is on disk.
+        _err("preview/ holds a fragment for a pull request already released: "
+             + ", ".join(f"#{pr} in {shipped[pr]}" for pr in dupes))
+        return 2
+
     current = parse_semver(groups[0][0])[:2] if groups else None
     bump = "patch" if current == new[:2] else "minor"
     if bump == "minor" and current is not None:
@@ -327,8 +362,6 @@ def cmd_rollup(args):
         render_root_changelog(changes, preview=False, docs_branch=args.docs_branch))
     print(f"rolled up {len(preview)} fragment(s) into {args.version} ({bump})")
     return 0
-
-
 # ---------- CLI ----------
 
 def main(argv=None):
