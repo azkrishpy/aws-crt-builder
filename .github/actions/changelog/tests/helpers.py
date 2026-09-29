@@ -44,3 +44,26 @@ def _render(tmp_path):
     text = render.render_root_changelog(tmp_path / ".changes")
     (tmp_path / "CHANGELOG.md").write_text(text)
     return text
+
+
+def _rollup(tmp_path, version, date, minor_prs=""):
+    argv = [
+        "rollup", "--version", version, "--date", date,
+        "--changes-dir", str(tmp_path / ".changes"),
+        "--changelog", str(tmp_path / "CHANGELOG.md"),
+    ]
+    if minor_prs:
+        argv += ["--minor-prs", minor_prs]
+    return changelog.main(argv)
+
+
+def _released(tmp_path, pr, version, date="2026-01-01", **over):
+    """Write one already-released fragment, as a rollup would have stamped it."""
+    d = tmp_path / ".changes" / "released"
+    d.mkdir(parents=True, exist_ok=True)
+    frag = {"pr": pr, "type": "feat", "summary": "A", "notes": "",
+            "version": version, "date": date}
+    frag.update(over)
+    p = d / f"{pr}.json"
+    p.write_text(json.dumps(frag))
+    return p

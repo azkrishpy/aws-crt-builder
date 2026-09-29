@@ -61,7 +61,7 @@ def parse_title(title):
 REQUIRED_FRAGMENT = {"pr", "type", "summary"}
 
 
-def validate_fragment(path):
+def validate_fragment(path, released=False):
     errs = []
     try:
         data = json.loads(Path(path).read_text())
@@ -83,12 +83,23 @@ def validate_fragment(path):
         # the fragment agrees with the --pr the caller was triggered for. What is
         # left is the placeholder, which renders as a dead `(#0)` reference.
         errs.append(f"{path}: pr must be the real pull request number, not {pr}")
+    if "impact" in data and data["impact"] != "minor":
+        errs.append(f'{path}: impact, when present, must be "minor"')
+    if "version" in data and not SEMVER_RE.match(str(data["version"])):
+        errs.append(f"{path}: version, when present, must be x.y.z")
+    if "date" in data and not ISO_DATE_RE.match(str(data["date"])):
+        errs.append(f"{path}: date, when present, must be YYYY-MM-DD")
     notes = data.get("notes", "")
     if not isinstance(notes, str):
         errs.append(f"{path}: notes must be a string")
     elif data.get("type") == "revert" and not notes.strip():
         # The whole reason a revert needs its own entry is to say why.
         errs.append(f"{path}: a revert needs notes explaining why")
+    if released:
+        # Without the stamp the entry groups under no version, so it renders
+        # nowhere -- a published entry silently disappearing.
+        errs += [f"{path}: released fragment is missing {k}"
+                 for k in ("version", "date") if k not in data]
     return errs
 
 

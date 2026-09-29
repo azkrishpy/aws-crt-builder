@@ -11,6 +11,7 @@ Fragments are the source of truth. CHANGELOG.md is fully regenerated from them
 """
 
 from fragments import cmd_seed
+from release import cmd_rollup
 from render import cmd_render
 import argparse
 import sys
@@ -34,6 +35,19 @@ def main(argv=None):
     r.add_argument("--changes-dir", default=".changes")
     r.add_argument("--changelog", default="CHANGELOG.md")
     r.set_defaults(func=cmd_render)
+
+    u = sub.add_parser("rollup",
+                       help="cut a release: a minor archives the outgoing line")
+    u.add_argument("--version", required=True)
+    u.add_argument("--date", required=True)
+    u.add_argument("--changes-dir", default=".changes")
+    u.add_argument("--changelog", default="CHANGELOG.md")
+    u.add_argument("--docs-branch", default="docs",
+                   help="Branch named in the pointer to the in-flight changelog.")
+    u.add_argument("--minor-prs", default="",
+                   help="Comma-separated PRs the ABI check labelled `minor`; "
+                        "their entries render under Possible Breaking Changes.")
+    u.set_defaults(func=cmd_rollup)
 
     args = p.parse_args(argv)
     return args.func(args)
