@@ -20,6 +20,17 @@ def _render(tmp_path):
     return text
 
 
+def _rollup(tmp_path, version, date, minor_prs=""):
+    argv = [
+        "rollup", "--version", version, "--date", date,
+        "--changes-dir", str(tmp_path / ".changes"),
+        "--changelog", str(tmp_path / "CHANGELOG.md"),
+    ]
+    if minor_prs:
+        argv += ["--minor-prs", minor_prs]
+    return cl.main(argv)
+
+
 # ---------- seed ----------
 
 def test_seed_refuses_a_placeholder_pr(tmp_path):
@@ -119,7 +130,26 @@ def test_render_preserves_summary_punctuation(tmp_path):
 # ---------- rollup: patch ----------
 
 
+def test_rollup_with_no_fragments_still_releases(tmp_path):
+    # A patch of nothing but chores is routine; failing here would fail the
+    # release job after it has already tagged. It renders no section, because
+    # there is nothing customer-facing to put under one.
+    (tmp_path / ".changes" / "preview").mkdir(parents=True)
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 0
+    assert "## [1.0.0]" not in (tmp_path / "CHANGELOG.md").read_text()
+
+
 # ---------- rollup: minor / freeze ----------
+
+
+def test_rollup_bad_semver_rejected(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    assert _rollup(tmp_path, "notaversion", "2026-01-01") == 2
+
+
+def test_rollup_bad_date_rejected(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    assert _rollup(tmp_path, "1.0.0", "not-a-date") == 2
 
 
 # ---------- resilience ----------
@@ -187,14 +217,63 @@ def _preview(tmp_path, name, text):
 
 # ---------- a release never silently drops a fragment ----------
 
+def test_rollup_refuses_a_malformed_fragment(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _preview(tmp_path, "2.json", "{ not json")
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 2
+    assert (tmp_path / ".changes" / "preview" / "1.json").exists()
+    assert not (tmp_path / ".changes" / "latest" / "1.0.0").exists()
+
+
+def test_rollup_refuses_a_schema_invalid_fragment(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _preview(tmp_path, "2.json", json.dumps(
+        {"pr": "two", "type": "feat", "summary": "", "url": "u"}))
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 2
+
+
+def test_rollup_refuses_a_fragment_whose_name_and_pr_disagree(tmp_path):
+    # Would render the entry under someone else's number.
+    _preview(tmp_path, "1.json", json.dumps(
+        {"pr": 999, "type": "feat", "summary": "Mislabelled", "url": "u", "notes": ""}))
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 2
+
+
+def test_rollup_reports_an_all_invalid_preview_as_invalid_not_empty(tmp_path):
+    _preview(tmp_path, "1.json", "{ not json")
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 2
+
 
 # ---------- one hiding policy, one placeholder ----------
+
+
+def test_a_release_with_nothing_visible_renders_no_section(tmp_path):
+    # A bare header with nothing under it reads as a broken file, so the release
+    # simply does not appear -- the fragment is kept, it just renders nowhere.
+    _seed(tmp_path, 1, "chore: internal only")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [1.0.0]" not in root
+    assert "_Nothing yet._" not in root
+    assert (tmp_path / ".changes" / "released" / "1.json").exists()
 
 
 # ---------- changed-paths hygiene ----------
 
 
 # ---------- guards that only a hand-mangled tree can reach ----------
+
+def test_render_refuses_to_drop_a_released_entry(tmp_path):
+    _released(tmp_path, 1, "1.0.0")
+    _released(tmp_path, 2, "1.0.0", type="bogus")
+    assert cl.main(["render", "--changes-dir", _changes(tmp_path),
+                    "--changelog", str(tmp_path / "CHANGELOG.md")]) == 2
+
+
+def test_rollup_refuses_to_drop_a_released_entry(tmp_path):
+    _released(tmp_path, 1, "1.0.0")
+    _released(tmp_path, 2, "1.0.0", type="bogus")
+    assert _rollup(tmp_path, "1.1.0", "2026-01-01") == 2
 
 
 def test_render_subcommand_writes_the_file(tmp_path):
@@ -203,6 +282,25 @@ def test_render_subcommand_writes_the_file(tmp_path):
     assert cl.main(["render", "--changes-dir", _changes(tmp_path),
                     "--changelog", str(out)]) == 0
     assert "a thing" in out.read_text()
+
+
+def test_a_minor_pr_renders_under_possible_breaking_changes(tmp_path):
+    _seed(tmp_path, 20, "feat: replace the socket options layout")
+    _seed(tmp_path, 21, "feat: add a knob")
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01", minor_prs="20") == 0
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    breaking = root.split("### Possible Breaking Changes", 1)[1].split("###", 1)[0]
+    assert "#20" in breaking and "#21" not in breaking
+    # Excluded from its own type section, not duplicated into it.
+    features = root.split("### Features", 1)[1]
+    assert "#21" in features and "#20" not in features
+
+
+def test_the_impact_stamp_survives_a_re_render(tmp_path):
+    # The label is read once, at release. Later renders must not need it again.
+    _seed(tmp_path, 30, "fix: change a struct")
+    _rollup(tmp_path, "1.0.0", "2026-01-01", minor_prs="30")
+    assert "Possible Breaking Changes" in _render(tmp_path)
 
 
 def test_notes_render_as_their_own_section_last(tmp_path):
@@ -229,10 +327,48 @@ def test_a_section_is_omitted_when_empty(tmp_path):
         assert absent not in text
 
 
+def test_the_release_branch_points_at_the_docs_branch(tmp_path):
+    _seed(tmp_path, 60, "feat: a thing")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [Preview]" not in root
+    assert "tree/docs/CHANGELOG.md" in root
+
+
 def test_a_revert_title_is_not_double_prefixed(tmp_path):
     _seed(tmp_path, 2, "revert: Reverted the retry default")
     data = json.loads((tmp_path / ".changes" / "preview" / "2.json").read_text())
     assert data["summary"] == "Reverted the retry default"
+
+
+def test_the_docs_pointer_is_only_linked_when_it_resolves(tmp_path):
+    # ../../tree/<branch>/ reaches the repo root only for a one-segment branch.
+    _seed(tmp_path, 1, "feat: a")
+    assert cl.main(["rollup", "--version", "1.0.0", "--date", "2026-01-01",
+                    "--changes-dir", _changes(tmp_path),
+                    "--changelog", str(tmp_path / "a.md"),
+                    "--docs-branch", "docs"]) == 0
+    assert "(../../tree/docs/CHANGELOG.md)" in (tmp_path / "a.md").read_text()
+
+    _seed(tmp_path, 2, "feat: b")
+    assert cl.main(["rollup", "--version", "1.1.0", "--date", "2026-02-01",
+                    "--changes-dir", _changes(tmp_path),
+                    "--changelog", str(tmp_path / "b.md"),
+                    "--docs-branch", "team/docs"]) == 0
+    text = (tmp_path / "b.md").read_text()
+    assert "`team/docs` branch" in text and "../../tree/team/docs" not in text
+
+
+def _released(tmp_path, pr, version, date="2026-01-01", **over):
+    """Write one already-released fragment, as a rollup would have stamped it."""
+    d = tmp_path / ".changes" / "released"
+    d.mkdir(parents=True, exist_ok=True)
+    frag = {"pr": pr, "type": "feat", "summary": "A", "url": "u", "notes": "",
+            "version": version, "date": date}
+    frag.update(over)
+    p = d / f"{pr}.json"
+    p.write_text(json.dumps(frag))
+    return p
 
 
 # ---------- degraded trees render rather than crash ----------
@@ -282,5 +418,27 @@ def test_seeding_a_revert_drops_the_original_prefix_and_number(tmp_path):
     d = json.loads((tmp_path / ".changes" / "preview" / "900.json").read_text())
     assert d["type"] == "revert"
     assert d["summary"] == "Reverted add SSO sign-in"
+
+
+def test_rollup_stamps_and_moves_fragments(tmp_path):
+    _seed(tmp_path, 1, "feat: initial")
+    _seed(tmp_path, 2, "chore: bump")
+    assert _rollup(tmp_path, "1.0.0", "2026-08-01") == 0
+    assert list((tmp_path / ".changes" / "preview").glob("*.json")) == []
+    released = tmp_path / ".changes" / "released"
+    assert {p.name for p in released.glob("*.json")} == {"1.json", "2.json"}
+    data = json.loads((released / "1.json").read_text())
+    # The version and date live on the fragment; there is no side file.
+    assert data["version"] == "1.0.0" and data["date"] == "2026-08-01"
+
+
+def test_a_released_fragment_must_carry_its_version(tmp_path):
+    # Without the stamp the entry renders nowhere, so a caller that writes a
+    # changelog must stop instead of publishing a file that lost it.
+    _released(tmp_path, 1, "1.0.0")
+    p = tmp_path / ".changes" / "released" / "1.json"
+    p.write_text(json.dumps({"pr": 1, "type": "feat", "summary": "A", "url": "u",
+                             "notes": "", "date": "2026-01-01"}))
+    assert cl.audit_released(tmp_path / ".changes")
 
 

@@ -47,7 +47,7 @@ def parse_title(title):
         return "revert", m.group(1).strip()
     return None, title
 REQUIRED_FRAGMENT = {"pr", "type", "summary", "url"}
-def validate_fragment(path):
+def validate_fragment(path, released=False):
     errs = []
     try:
         data = json.loads(Path(path).read_text())
@@ -69,15 +69,24 @@ def validate_fragment(path):
     u = data.get("url")
     if not isinstance(u, str) or not u.strip():
         errs.append(f"{path}: url must be non-empty string")
+    if "impact" in data and data["impact"] != "minor":
+        errs.append(f'{path}: impact, when present, must be "minor"')
+    if "version" in data and not SEMVER_RE.match(str(data["version"])):
+        errs.append(f"{path}: version, when present, must be x.y.z")
+    if "date" in data and not ISO_DATE_RE.match(str(data["date"])):
+        errs.append(f"{path}: date, when present, must be YYYY-MM-DD")
     notes = data.get("notes", "")
     if not isinstance(notes, str):
         errs.append(f"{path}: notes must be a string")
     elif data.get("type") == "revert" and not notes.strip():
         # The whole reason a revert needs its own entry is to say why.
         errs.append(f"{path}: a revert needs notes explaining why")
+    if released:
+        # Without the stamp the entry groups under no version, so it renders
+        # nowhere -- a published entry silently disappearing.
+        errs += [f"{path}: released fragment is missing {k}"
+                 for k in ("version", "date") if k not in data]
     return errs
-
-
 def parse_semver(s):
     m = SEMVER_RE.match(s)
     if not m:
@@ -237,6 +246,20 @@ def cmd_seed(args):
     return 0
 def _err(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
+def _release_preview(changes, version, date, minor_prs):
+    """Stamp each preview fragment with its release and move it to released/."""
+    out = changes / "released"
+    out.mkdir(parents=True, exist_ok=True)
+    for f in sorted((changes / "preview").glob("*.json")):
+        data = json.loads(f.read_text())
+        data["version"], data["date"] = version, date
+        # The ABI verdict lives on the pull request, not in the fragment the
+        # author wrote. Stamp it in as the fragment is released, so every later
+        # re-render reaches the same answer without asking GitHub.
+        if data.get("pr") in minor_prs:
+            data["impact"] = "minor"
+        (out / f.name).write_text(json.dumps(data, indent=2) + "\n")
+        f.unlink()
 def cmd_render(args):
     if audit_released(args.changes_dir):
         return 2
@@ -244,6 +267,41 @@ def cmd_render(args):
         render_root_changelog(args.changes_dir, preview=True))
     print(f"rendered → {args.changelog}")
     return 0
+def cmd_rollup(args):
+    """Move every preview fragment into released/, stamped with this release."""
+    changes = Path(args.changes_dir)
+    if audit_released(changes):
+        return 2
+
+    try:
+        new = parse_semver(args.version)
+    except ValueError as e:
+        _err(str(e))
+        return 2
+    if not ISO_DATE_RE.match(args.date):
+        _err(f"--date must be YYYY-MM-DD, got {args.date!r}")
+        return 2
+
+    preview_dir = changes / "preview"
+    on_disk = sorted(preview_dir.glob("*.json")) if preview_dir.exists() else []
+    # An empty preview/ is a valid release: a patch of nothing but chores is
+    # routine, and failing here would fail the release job after it has tagged.
+    preview = load_dir(preview_dir)
+    if len(preview) != len(on_disk):
+        # Releasing anyway would move the rejected files into released/, where
+        # they render nowhere and are never looked at again.
+        _err(f"{len(on_disk) - len(preview)} of {len(on_disk)} fragment(s) in "
+             f"{preview_dir} are invalid (see the warnings above); fix them first")
+        return 2
+
+    _release_preview(changes, args.version, args.date,
+                     {int(p) for p in args.minor_prs.split(",") if p.strip()})
+    Path(args.changelog).write_text(
+        render_root_changelog(changes, preview=False, docs_branch=args.docs_branch))
+    print(f"rolled up {len(preview)} fragment(s) into {args.version}")
+    return 0
+
+
 # ---------- CLI ----------
 
 def main(argv=None):
@@ -263,6 +321,19 @@ def main(argv=None):
     r.add_argument("--changes-dir", default=".changes")
     r.add_argument("--changelog", default="CHANGELOG.md")
     r.set_defaults(func=cmd_render)
+
+    u = sub.add_parser("rollup",
+                       help="cut a release: a minor archives the outgoing line")
+    u.add_argument("--version", required=True)
+    u.add_argument("--date", required=True)
+    u.add_argument("--changes-dir", default=".changes")
+    u.add_argument("--changelog", default="CHANGELOG.md")
+    u.add_argument("--docs-branch", default="docs",
+                   help="Branch named in the pointer to the in-flight changelog.")
+    u.add_argument("--minor-prs", default="",
+                   help="Comma-separated PRs the ABI check labelled `minor`; "
+                        "their entries render under Possible Breaking Changes.")
+    u.set_defaults(func=cmd_rollup)
 
     args = p.parse_args(argv)
     return args.func(args)
