@@ -129,6 +129,19 @@ def test_render_preserves_summary_punctuation(tmp_path):
 
 # ---------- rollup: patch ----------
 
+def test_rollup_patch_accretes_into_same_line(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.0", "2026-08-01")
+    _seed(tmp_path, 2, "fix: b")
+    _rollup(tmp_path, "2.0.1", "2026-08-15")
+    released = tmp_path / ".changes" / "released"
+    assert {p.name for p in released.glob("*.json")} == {"1.json", "2.json"}
+    assert not (tmp_path / ".changes" / "2.0.x.md").exists()
+    text = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [2.0.1] — 2026-08-15" in text
+    assert "## [2.0.0] — 2026-08-01" in text
+    assert text.index("[2.0.1]") < text.index("[2.0.0]")
+
 
 def test_rollup_with_no_fragments_still_releases(tmp_path):
     # A patch of nothing but chores is routine; failing here would fail the
@@ -140,6 +153,46 @@ def test_rollup_with_no_fragments_still_releases(tmp_path):
 
 
 # ---------- rollup: minor / freeze ----------
+
+def test_rollup_minor_freezes_previous_line(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.0", "2026-08-01")
+    _seed(tmp_path, 2, "fix: b")
+    _rollup(tmp_path, "2.0.1", "2026-08-15")
+    _seed(tmp_path, 3, "feat: tcp_nodelay")
+    _rollup(tmp_path, "2.1.0", "2026-08-19")
+
+    changes = tmp_path / ".changes"
+    # Pruned at freeze: the archive is the record, git keeps the fragments.
+    assert {p.name for p in (changes / "released").glob("*.json")} == {"3.json"}
+    frozen = (changes / "2.0.x.md").read_text()
+    assert "## [Preview]" not in frozen
+    assert frozen.startswith("# Changelog — 2.0.x")
+    assert "## [2.0.1]" in frozen and "## [2.0.0]" in frozen
+    assert "## [2.1.0]" not in frozen
+
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [2.1.0]" in root
+    assert "## [2.0.0]" not in root and "## [2.0.1]" not in root
+    assert "## [Preview]" not in root
+    assert "docs" in root
+
+
+def test_the_first_release_archives_nothing(tmp_path):
+    _seed(tmp_path, 1, "feat: initial")
+    assert _rollup(tmp_path, "1.0.0", "2026-01-01") == 0
+    assert cl.releases(tmp_path / ".changes")[0][0] == "1.0.0"
+    assert cl.frozen_lines(tmp_path / ".changes") == []
+
+
+def test_rollup_major_archives_the_current_minor_line(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "2.0.0", "2026-08-01")
+    _seed(tmp_path, 2, "feat: big change")
+    _rollup(tmp_path, "3.0.0", "2027-01-01")
+    changes = tmp_path / ".changes"
+    assert (changes / "2.0.x.md").exists()
+    assert {p.name for p in (changes / "released").glob("*.json")} == {"2.json"}
 
 
 def test_rollup_bad_semver_rejected(tmp_path):
@@ -178,6 +231,42 @@ def test_render_skips_schema_invalid_fragment(tmp_path, capsys):
 # ---------- list smoke ----------
 
 # ---------- full lifecycle ----------
+
+def test_full_lifecycle_end_to_end(tmp_path):
+    _seed(tmp_path, 843, "feat: SSO sign-in")
+    _seed(tmp_path, 850, "fix: idempotency token drop on 429")
+    _seed(tmp_path, 858, "chore: bump aws-lc")
+    _rollup(tmp_path, "2.0.0", "2026-08-01")
+
+    _seed(tmp_path, 867, "fix: leaking fd on socket teardown")
+    _write(tmp_path, 870, "revert", summary="Reverted the retry-default change",
+           notes="It changed behaviour customers relied on.")
+    _seed(tmp_path, 872, "fix: null-deref in event loop")
+    _render(tmp_path)
+
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [Preview]" in root
+    assert "#867" in root and "#870" in root and "#872" in root
+
+    _rollup(tmp_path, "2.0.1", "2026-08-15")
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [2.0.1] — 2026-08-15" in root
+    assert "## [2.0.0] — 2026-08-01" in root
+    assert not (tmp_path / ".changes" / "2.0.x.md").exists()
+
+    _seed(tmp_path, 875, "fix: retry backoff off-by-one")
+    _seed(tmp_path, 878, "feat: add tcp_nodelay to socket options")
+    _rollup(tmp_path, "2.1.0", "2026-08-19")
+
+    frozen = (tmp_path / ".changes" / "2.0.x.md").read_text()
+    assert frozen.startswith("# Changelog — 2.0.x")
+    assert "## [2.0.1]" in frozen and "## [2.0.0]" in frozen
+    assert "## [Preview]" not in frozen
+
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## [2.1.0] — 2026-08-19" in root
+    assert "## [2.0.1]" not in root and "## [2.0.0]" not in root
+    assert "## [Preview]" not in root
 
 
 # ---------- type set, title forms, and the fragment waiver ----------
@@ -245,6 +334,16 @@ def test_rollup_reports_an_all_invalid_preview_as_invalid_not_empty(tmp_path):
 
 
 # ---------- one hiding policy, one placeholder ----------
+
+def test_an_archive_hides_chores_like_the_root_does(tmp_path):
+    _seed(tmp_path, 1, "feat: visible")
+    _seed(tmp_path, 2, "chore: internal only")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    _seed(tmp_path, 3, "feat: next line")
+    _rollup(tmp_path, "1.1.0", "2026-02-01")
+    frozen = (tmp_path / ".changes" / "1.0.x.md").read_text()
+    assert "visible" in frozen
+    assert "internal only" not in frozen
 
 
 def test_a_release_with_nothing_visible_renders_no_section(tmp_path):
@@ -335,6 +434,17 @@ def test_the_release_branch_points_at_the_docs_branch(tmp_path):
     assert "tree/docs/CHANGELOG.md" in root
 
 
+def test_archive_links_are_repo_relative(tmp_path):
+    # An absolute --changes-dir must not leak a local path into the markdown.
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    _seed(tmp_path, 2, "feat: b")
+    _rollup(tmp_path, "1.1.0", "2026-02-01")
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "- [1.0.x](.changes/1.0.x.md)" in root
+    assert str(tmp_path) not in root
+
+
 def test_a_revert_title_is_not_double_prefixed(tmp_path):
     _seed(tmp_path, 2, "revert: Reverted the retry default")
     data = json.loads((tmp_path / ".changes" / "preview" / "2.json").read_text())
@@ -420,6 +530,16 @@ def test_seeding_a_revert_drops_the_original_prefix_and_number(tmp_path):
     assert d["summary"] == "Reverted add SSO sign-in"
 
 
+def test_the_root_changelog_links_archived_lines(tmp_path):
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    _seed(tmp_path, 2, "feat: b")
+    _rollup(tmp_path, "1.1.0", "2026-02-01")
+    root = (tmp_path / "CHANGELOG.md").read_text()
+    assert "## Earlier releases" in root
+    assert "1.0.x.md" in root
+
+
 def test_rollup_stamps_and_moves_fragments(tmp_path):
     _seed(tmp_path, 1, "feat: initial")
     _seed(tmp_path, 2, "chore: bump")
@@ -432,6 +552,21 @@ def test_rollup_stamps_and_moves_fragments(tmp_path):
     assert data["version"] == "1.0.0" and data["date"] == "2026-08-01"
 
 
+def test_rollup_finishes_an_interrupted_freeze(tmp_path):
+    # Crash after the archive is written but before its fragments are pruned.
+    # The archive is a pure function of those fragments, so the next rollup
+    # rewrites it and completes the prune rather than wedging.
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    (tmp_path / ".changes" / "1.0.x.md").write_text("# Changelog — 1.0.x\n")
+    _seed(tmp_path, 2, "feat: b")
+    assert _rollup(tmp_path, "1.1.0", "2026-02-01") == 0
+    archive = (tmp_path / ".changes" / "1.0.x.md").read_text()
+    assert "## [1.0.0]" in archive
+    assert {p.name for p in (tmp_path / ".changes" / "released").glob("*.json")} \
+        == {"2.json"}
+
+
 def test_a_released_fragment_must_carry_its_version(tmp_path):
     # Without the stamp the entry renders nowhere, so a caller that writes a
     # changelog must stop instead of publishing a file that lost it.
@@ -442,3 +577,10 @@ def test_a_released_fragment_must_carry_its_version(tmp_path):
     assert cl.audit_released(tmp_path / ".changes")
 
 
+def test_an_archive_points_back_at_the_current_changelog(tmp_path):
+    # .changes/<line>.md is one level down, so `..` reaches the repo root.
+    _seed(tmp_path, 1, "feat: a")
+    _rollup(tmp_path, "1.0.0", "2026-01-01")
+    _seed(tmp_path, 2, "feat: b")
+    _rollup(tmp_path, "1.1.0", "2026-02-01")
+    assert "(../CHANGELOG.md)" in (tmp_path / ".changes" / "1.0.x.md").read_text()

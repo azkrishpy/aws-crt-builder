@@ -7,6 +7,7 @@ Fragments are the source of truth. CHANGELOG.md is fully regenerated from them
   .changes/
   ├── preview/<pr>.json      awaiting release; written by the pull request author
   ├── released/<pr>.json      shipped; stamped with its version and date at release
+  └── <M>.<N>.x.md            archive of a closed minor line
 """
 import argparse
 import json
@@ -216,6 +217,11 @@ def render_root_changelog(changes_dir, preview=True, docs_branch="docs"):
         body += [f"- [{f.stem}]({rel}/{f.name})" for f in frozen]
         body.append("")
     return "\n".join(body).rstrip() + "\n"
+def render_line_archive(line, groups):
+    """A self-contained file for a minor line that will take no more releases."""
+    body = [f"# Changelog — {line}", "",
+            "Current releases are in the [top-level changelog](../CHANGELOG.md).", ""]
+    return "\n".join(body + _release_sections(groups)).rstrip() + "\n"
 # ---------- commands ----------
 
 def cmd_seed(args):
@@ -246,6 +252,21 @@ def cmd_seed(args):
     return 0
 def _err(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
+def _freeze(changes, line, groups):
+    """Archive a closing minor line to one file and drop its fragments.
+
+    Re-runnable: a crash between writing the archive and pruning leaves both, and
+    the next rollup rewrites the archive from the same fragments and finishes.
+    """
+    archive = changes / f"{line[0]}.{line[1]}.x.md"
+    closing = [(v, f) for v, f in groups if parse_semver(v)[:2] == line]
+    archive.write_text(render_line_archive(archive.stem, closing))
+    # The archive is the record from here on. Keeping the fragments too would
+    # add one file per merged pull request forever, for nothing that reads them;
+    # `git log -- .changes` still has every one.
+    for _version, frags in closing:
+        for frag in frags:
+            (changes / "released" / f"{frag['pr']}.json").unlink()
 def _release_preview(changes, version, date, minor_prs):
     """Stamp each preview fragment with its release and move it to released/."""
     out = changes / "released"
@@ -268,7 +289,7 @@ def cmd_render(args):
     print(f"rendered → {args.changelog}")
     return 0
 def cmd_rollup(args):
-    """Move every preview fragment into released/, stamped with this release."""
+    """Two flows: a patch accretes into released/; a minor archives the old line."""
     changes = Path(args.changes_dir)
     if audit_released(changes):
         return 2
@@ -294,11 +315,17 @@ def cmd_rollup(args):
              f"{preview_dir} are invalid (see the warnings above); fix them first")
         return 2
 
+    groups = releases(changes)
+    current = parse_semver(groups[0][0])[:2] if groups else None
+    bump = "patch" if current == new[:2] else "minor"
+    if bump == "minor" and current is not None:
+        _freeze(changes, current, groups)
+
     _release_preview(changes, args.version, args.date,
                      {int(p) for p in args.minor_prs.split(",") if p.strip()})
     Path(args.changelog).write_text(
         render_root_changelog(changes, preview=False, docs_branch=args.docs_branch))
-    print(f"rolled up {len(preview)} fragment(s) into {args.version}")
+    print(f"rolled up {len(preview)} fragment(s) into {args.version} ({bump})")
     return 0
 
 
