@@ -1,10 +1,35 @@
 """Cutting a release: what a version is allowed to be, stamping fragments as
 released, and archiving a minor line that will take no more."""
 
-from fragments import ISO_DATE_RE, _err, audit_released, load_dir, parse_semver, releases
+from fragments import ISO_DATE_RE, _err, _line_of, audit_released, fmt_semver, frozen_lines, load_dir, parse_semver, releases
 from pathlib import Path
 from render import render_line_archive, render_root_changelog
 import json
+
+
+# No changelog before this. Everything earlier shipped without fragments, so a
+# rollup of it would render a release whose entries do not exist.
+FIRST_VERSION = (1, 0, 0)
+
+
+def _check_version(changes, new, version, groups):
+    """Error string if `version` cannot be the next release."""
+    if new < FIRST_VERSION:
+        return (f"{version} predates {fmt_semver(FIRST_VERSION)}; releases before "
+                f"that shipped without fragments and are not in the changelog")
+    if groups:
+        highest = parse_semver(groups[0][0])
+        if new <= highest:
+            return f"{version} is not newer than the released {fmt_semver(highest)}"
+    for archive in frozen_lines(changes):
+        # Reopening a closed line would split it: its archive is already written
+        # and the root changelog only renders released/.
+        line = _line_of(archive.name)
+        if new[:2] == line:
+            return f"{version} belongs to {archive.name}, which is already archived"
+        if new[:2] < line:
+            return f"{version} is older than the archived line {archive.name}"
+    return None
 
 
 def _freeze(changes, line, groups):
@@ -68,6 +93,19 @@ def cmd_rollup(args):
         return 2
 
     groups = releases(changes)
+    err = _check_version(changes, new, args.version, groups)
+    if err:
+        _err(err)
+        return 2
+
+    shipped = {f["pr"]: v for v, frags in groups for f in frags}
+    dupes = sorted(f["pr"] for f in preview if f["pr"] in shipped)
+    if dupes:
+        # Two entries for one pull request, in two releases. Whichever is stale
+        # would keep rendering, because a re-render trusts what is on disk.
+        _err("preview/ holds a fragment for a pull request already released: "
+             + ", ".join(f"#{pr} in {shipped[pr]}" for pr in dupes))
+        return 2
 
     current = parse_semver(groups[0][0])[:2] if groups else None
     bump = "patch" if current == new[:2] else "minor"
