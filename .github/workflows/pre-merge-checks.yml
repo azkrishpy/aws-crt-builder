@@ -133,13 +133,140 @@ jobs:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
 
+  # Deliberately not behind `approval`: it holds no credentials and checks out
+  # no PR code, so a first-time fork contributor gets feedback with no
+  # maintainer click. No activity filter either -- title and fragment each
+  # change independently.
+  changelog:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      # write, not read: a missing fragment earns one guidance comment.
+      pull-requests: write
+    steps:
+      - name: Fetch the fragment at the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Read the blob, not a checkout: the base repo's Contents API resolves
+          # a fork head sha, keeping allow-unsafe-pr-checkout in the ABI job.
+          DEST="${RUNNER_TEMP}/changes/preview"
+          mkdir -p "$DEST"
+          BODY="$(mktemp)"
+          if gh api "repos/${REPO}/contents/.changes/preview/${PR}.json?ref=${HEAD_SHA}" \
+               -H 'Accept: application/vnd.github.raw' > "$BODY" 2>/dev/null; then
+            cp "$BODY" "${DEST}/${PR}.json"
+            exit 0
+          fi
+          # Only a bare "Not Found" means the ref resolved and the file is
+          # absent; treating anything else as missing would waive the check.
+          MSG="$(jq -r '.message // "unparsable response"' < "$BODY" 2>/dev/null || echo 'unparsable response')"
+          if [[ "$MSG" != "Not Found" ]]; then
+            echo "::error::could not read the changelog fragment at ${HEAD_SHA}: ${MSG}"
+            exit 1
+          fi
+          echo "No fragment present; the check step decides whether that matters."
+
+      - name: List the pull request's changes under .changes/
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # `status<TAB>path` per changed path, so the check can require exactly
+          # one new fragment at its own path. Endpoint caps out at 3000 files.
+          OUT="${RUNNER_TEMP}/changed-paths.tsv"
+          gh api --paginate "repos/${REPO}/pulls/${PR}/files?per_page=100" \
+            --jq '.[] | select(.filename | startswith(".changes/"))
+                  | "\(.status)\t\(.filename)"' > "$OUT"
+          echo "file=${OUT}" >> "$GITHUB_OUTPUT"
+          echo "Changed paths under .changes/:"
+          sed 's/^/  /' "$OUT"
+
+      # Before the comment step: only this step knows whether a fragment was
+      # required. It does not fail the job; the last step does.
+      - name: Check the PR title and the fragment
+        id: check
+        # TODO: pin back to @main once the changelog action is on main.
+        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        with:
+          mode: check
+          pr: ${{ github.event.pull_request.number }}
+          title: ${{ github.event.pull_request.title }}
+          # Bots cannot be asked to retitle, and failing every dependency bump
+          # would train people to ignore the check.
+          bot-author: ${{ endsWith(github.event.pull_request.user.login, '[bot]') && github.event.pull_request.user.login || '' }}
+          changes-dir: ${{ runner.temp }}/changes
+          changed-paths-file: ${{ steps.paths.outputs.file }}
+          changes-prefix: .changes
+
+      - name: Seed a fragment template
+        if: ${{ steps.check.outputs.reason == 'missing-fragment' }}
+        # TODO: pin back to @main once the changelog action is on main.
+        uses: awslabs/aws-crt-builder/.github/actions/changelog@feat/pre-merge-checks
+        with:
+          mode: seed
+          pr: ${{ github.event.pull_request.number }}
+          title: ${{ github.event.pull_request.title }}
+          url: ${{ github.event.pull_request.html_url }}
+          # Outside $RUNNER_TEMP/changes, so it is never mistaken for the
+          # author's own fragment.
+          out: ${{ runner.temp }}/seed-template.json
+
+      - name: Comment with the template, once per pull request
+        if: ${{ steps.check.outputs.reason == 'missing-fragment' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          TEMPLATE: ${{ runner.temp }}/seed-template.json
+        run: |
+          set -euo pipefail
+          # Keyed on a hidden marker, not the wording, so the text can change
+          # without the bot re-commenting everywhere.
+          MARKER='<!-- pre-merge-checks:changelog-template -->'
+          if gh api --paginate "repos/${REPO}/issues/${PR}/comments" \
+               --jq '.[].body' | grep -qF "$MARKER"; then
+            echo "Template comment already present on #${PR}; not repeating it."
+            exit 0
+          fi
+          {
+            printf '%s\n\n' "$MARKER"
+            printf 'This pull request has no changelog entry.\n\n'
+            printf 'Add `.changes/preview/%s.json` with this content, adjusting the summary to read as a release note:\n\n' "$PR"
+            printf '```json\n'
+            cat "$TEMPLATE"
+            printf '```\n\n'
+            printf '`type` is one of `feat`, `fix`, `chore`, `revert`, and decides which section the entry lands in. '
+            printf '`notes` is optional free-form detail -- for a revert, say why.\n\n'
+            printf 'A `chore` needs no entry at all, and a CI-only or pure-infra change is a `chore`.\n'
+          } > "${RUNNER_TEMP}/comment.md"
+          # jq builds the body so the markdown survives verbatim.
+          jq -n --rawfile body "${RUNNER_TEMP}/comment.md" '{body: $body}' \
+            | gh api --method POST "repos/${REPO}/issues/${PR}/comments" --input - >/dev/null
+          echo "Posted the changelog template comment on #${PR}."
+
+      - name: Fail if the changelog check did not pass
+        if: ${{ steps.check.outputs.rc != '0' }}
+        env:
+          REASON: ${{ steps.check.outputs.reason }}
+        run: |
+          echo "::error::changelog check failed (${REASON:-unknown}); see the step above."
+          exit 1
+
   # The single gate, and the only job reachable on every event -- so the only one
   # whose verdict is safe to require. always(), not !cancelled(): a cancelled run
   # must replace an earlier success rather than leave it standing.
   verdict-gate:
     # approval is in needs so a REJECTED approval fails outright, instead of
     # reaching the skipped-ABI path and being vouched for by an older run.
-    needs: [approval, abi-compat]
+    needs: [approval, abi-compat, changelog]
     if: ${{ always() }}
     runs-on: ${{ inputs.runs-on }}
     permissions:
