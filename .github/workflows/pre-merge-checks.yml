@@ -34,6 +34,11 @@ on:
         required: false
         type: string
         default: 'ubuntu-24.04'
+      builder-ref:
+        description: 'Ref of aws-crt-builder supplying the actions this workflow runs. A called workflow cannot discover its own ref -- github.job_workflow_sha is empty inside one and workflow_ref describes the caller -- so pin this to match whatever ref the caller pinned the workflow to.'
+        required: false
+        type: string
+        default: 'main'
     secrets:
       CRT_CI_ROLE_ARN:
         required: false
@@ -116,9 +121,16 @@ jobs:
           echo "Comparing ${BASE_SHA} (merge base) -> $(git rev-parse HEAD) (PR head)"
           echo "base-sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Check out the actions this workflow runs
+        uses: actions/checkout@v4
+        with:
+          repository: awslabs/aws-crt-builder
+          ref: ${{ inputs.builder-ref }}
+          path: .crt-builder
+
       - name: Check ABI
         id: check
-        uses: awslabs/aws-crt-builder/.github/actions/check-abi@main
+        uses: ./.crt-builder/.github/actions/check-abi
         with:
           lib-name: ${{ inputs.lib-name }}
           builder-version: latest
@@ -127,8 +139,7 @@ jobs:
           base-ref: ${{ steps.refs.outputs.base-sha }}
 
       - name: Apply the verdict label
-        # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/abi-label@feat/pre-merge-checks
+        uses: ./.crt-builder/.github/actions/abi-label
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
@@ -147,9 +158,15 @@ jobs:
       checks: read
       statuses: write
     steps:
+      - name: Check out the actions this workflow runs
+        uses: actions/checkout@v4
+        with:
+          repository: awslabs/aws-crt-builder
+          ref: ${{ inputs.builder-ref }}
+          path: .crt-builder
+
       - name: Decide and publish the gate status
-        # TODO: pin back to @main once this action is on main.
-        uses: awslabs/aws-crt-builder/.github/actions/pre-merge-gate@feat/pre-merge-checks
+        uses: ./.crt-builder/.github/actions/pre-merge-gate
         with:
           needs: ${{ toJSON(needs) }}
           head-sha: ${{ github.event.pull_request.head.sha }}
