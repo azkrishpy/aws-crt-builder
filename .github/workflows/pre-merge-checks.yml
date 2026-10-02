@@ -134,8 +134,8 @@ jobs:
         with:
           lib-name: ${{ inputs.lib-name }}
           builder-version: latest
-          # Passing base-ref makes the action compare exactly these two commits
-          # and skip its own labelling, which the next step does instead.
+          # Compare exactly these two commits rather than resolving the base ref
+          # a second time.
           base-ref: ${{ steps.refs.outputs.base-sha }}
 
       - name: Apply the verdict label
