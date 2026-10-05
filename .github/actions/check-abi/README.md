@@ -87,7 +87,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       id-token: write        # for configure-aws-credentials OIDC
-      # no pull-requests: write -- this action applies no label
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
