@@ -32,11 +32,30 @@ on:
         required: false
 
 jobs:
-  # Holds the approval environment so a fork's code waits for a reviewer.
-  approval:
+  # Clears the previous verdict as soon as the code could have changed.
+  clear:
     if: >-
       contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action)
       || (github.event.action == 'edited' && github.event.changes.base != null)
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Check out the actions this workflow runs
+        uses: actions/checkout@v4
+        with:
+          repository: awslabs/aws-crt-builder
+          ref: ${{ inputs.builder-ref }}
+          path: .crt-builder
+
+      - name: Clear the verdict
+        uses: ./.crt-builder/.github/actions/validate-label
+        with:
+          pr: ${{ github.event.pull_request.number }}
+
+  # Holds the approval environment so a fork's code waits for a reviewer.
+  approval:
+    needs: clear
     runs-on: ${{ inputs.runs-on }}
     permissions: {}
     environment: ${{ inputs.approval-environment }}
@@ -90,11 +109,6 @@ jobs:
           ref: ${{ inputs.builder-ref }}
           path: .crt-builder
 
-      - name: Clear the previous verdict
-        uses: ./.crt-builder/.github/actions/validate-label
-        with:
-          pr: ${{ github.event.pull_request.number }}
-
       - name: Check ABI
         id: check
         uses: ./.crt-builder/.github/actions/check-abi
@@ -111,7 +125,7 @@ jobs:
 
   # Posts the `pre-merge/gate` status on every event, from the live labels.
   verdict:
-    needs: [approval, abi-compat]
+    needs: [clear, approval, abi-compat]
     if: ${{ always() }}
     runs-on: ${{ inputs.runs-on }}
     permissions:
