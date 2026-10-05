@@ -1,18 +1,6 @@
 # Everything that must be true before a pull request merges, in one workflow.
-#
-# Consumers call this from a single `pull_request_target` workflow; it replaces
-# their per-repo check-abi.yml and block-needs-review.yml.
-#
-# Ordering has to come from `needs:` inside one run: a label applied with
-# GITHUB_TOKEN raises no workflow run, so a separate gate workflow would never
-# re-run when the ABI verdict lands, and would read whatever the previous commit
-# left behind.
-#
-# The branch-ruleset entry is the `pre-merge/gate` commit status, not a job name:
-# it is posted on every reachable path and is independent of every job name. The
-# nested job names ("upkeep / abi-compat" and so on) are what a human reads in
-# the merge box. One of them is load-bearing: pre-merge-gate finds the ABI check
-# run by its `abi-compat` name suffix.
+# Consumers call it from a single pull_request_target workflow; the branch ruleset
+# requires the `pre-merge/gate` commit status that the verdict job posts.
 name: Pre-merge checks
 
 on:
@@ -44,18 +32,13 @@ on:
         required: false
 
 jobs:
-  # Holds the deployment environment and nothing else: naming an environment on
-  # the credential-minting job would change its OIDC `sub`.
-  #
-  # This job's `if:` is the only place the "could the code have changed?"
-  # predicate is written; abi-compat inherits it through `needs:`.
+  # Holds the approval environment so a fork's code waits for a reviewer.
   approval:
     if: >-
       contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action)
       || (github.event.action == 'edited' && github.event.changes.base != null)
     runs-on: ${{ inputs.runs-on }}
     permissions: {}
-    # Empty name means no environment and no wait.
     environment: ${{ inputs.approval-environment }}
     steps:
       - name: Approved
@@ -63,17 +46,12 @@ jobs:
           FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           ENVIRONMENT: ${{ inputs.approval-environment }}
         run: |
-          # Fail closed. Referencing an environment that does not exist creates
-          # it with no protection rules, so a misconfigured caller looks gated
-          # in the run graph while running fork code unreviewed. This catches an
-          # empty name; that the environment has reviewers is a per-repo
-          # prerequisite to verify once, before adoption.
           if [[ "$FORK" == "true" && -z "$ENVIRONMENT" ]]; then
             echo "::error::a fork pull request reached this job with no approval environment; the caller must pass one."
             exit 1
           fi
-          echo "PR-authored code is approved to execute in this run."
 
+  # Diffs the merge base against the pull request head and labels the result.
   abi-compat:
     needs: approval
     runs-on: ${{ inputs.runs-on }}
@@ -86,24 +64,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.CRT_CI_ROLE_ARN }}
-          # Not an input: check-abi hardcodes a us-east-1 ECR registry, and
-          # `docker login` would present a token scoped to the wrong region.
           aws-region: us-east-1
 
       - name: Checkout the PR head
         uses: actions/checkout@v4
         with:
-          # head.sha, not head.ref: a bare ref resolves against the base repo,
-          # and under pull_request_target the default checkout is the base
-          # branch, which would diff main with itself and always say `patch`.
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-          # Needed from v4 onward to check out fork PR code under
-          # pull_request_target; the approval job is what makes it acceptable.
-          # actionlint <= 1.7.12 wrongly calls this input undefined.
           allow-unsafe-pr-checkout: true
-          # This tree is bind-mounted into a container that runs PR-authored
-          # CMake; leave no usable credential in .git/config.
           persist-credentials: false
 
       - name: Resolve the commits to compare
@@ -112,14 +80,8 @@ jobs:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --quiet origin \
-            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
-          # Merge base, not the base tip: diffing the tip attributes every
-          # commit that landed after this branch forked to this pull request, so
-          # the verdict would drift as unrelated pull requests merge.
-          BASE_SHA="$(git merge-base HEAD "origin/${BASE_BRANCH}")"
-          echo "Comparing ${BASE_SHA} (merge base) -> $(git rev-parse HEAD) (PR head)"
-          echo "base-sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags --quiet origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+          echo "base-sha=$(git merge-base HEAD "origin/${BASE_BRANCH}")" >> "$GITHUB_OUTPUT"
 
       - name: Check out the actions this workflow runs
         uses: actions/checkout@v4
@@ -127,6 +89,11 @@ jobs:
           repository: awslabs/aws-crt-builder
           ref: ${{ inputs.builder-ref }}
           path: .crt-builder
+
+      - name: Clear the previous verdict
+        uses: ./.crt-builder/.github/actions/validate-label
+        with:
+          pr: ${{ github.event.pull_request.number }}
 
       - name: Check ABI
         id: check
@@ -134,40 +101,44 @@ jobs:
         with:
           lib-name: ${{ inputs.lib-name }}
           builder-version: latest
-          # Compare exactly these two commits rather than resolving the base ref
-          # a second time.
           base-ref: ${{ steps.refs.outputs.base-sha }}
 
-      - name: Apply the verdict label
-        uses: ./.crt-builder/.github/actions/abi-label
+      - name: Apply the verdict
+        uses: ./.crt-builder/.github/actions/validate-label
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
 
-  # The single gate, and the only job reachable on every event -- so the only one
-  # whose verdict is safe to require. always(), not !cancelled(): a cancelled run
-  # must replace an earlier success rather than leave it standing.
-  verdict-gate:
-    # approval is in needs so a REJECTED approval fails outright, instead of
-    # reaching the skipped-ABI path and being vouched for by an older run.
+  # Posts the `pre-merge/gate` status on every event, from the live labels.
+  verdict:
     needs: [approval, abi-compat]
     if: ${{ always() }}
     runs-on: ${{ inputs.runs-on }}
     permissions:
       pull-requests: read
-      checks: read
       statuses: write
     steps:
-      - name: Check out the actions this workflow runs
-        uses: actions/checkout@v4
-        with:
-          repository: awslabs/aws-crt-builder
-          ref: ${{ inputs.builder-ref }}
-          path: .crt-builder
-
-      - name: Decide and publish the gate status
-        uses: ./.crt-builder/.github/actions/pre-merge-gate
-        with:
-          needs: ${{ toJSON(needs) }}
-          head-sha: ${{ github.event.pull_request.head.sha }}
-          pr: ${{ github.event.pull_request.number }}
+      - name: Publish the gate status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          FAILED="$(jq -r 'to_entries | map(select(.value.result == "failure" or .value.result == "cancelled")) | map(.key + "=" + .value.result) | join(", ")' <<< "$RESULTS")"
+          if [[ -n "$FAILED" ]]; then
+            STATE=failure; REASON="pre-merge check(s) did not pass: ${FAILED}"
+          elif ! LABELS="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels[].name')"; then
+            STATE=failure; REASON="could not read the labels on #${PR}"
+          elif grep -qxF needs-review <<< "$LABELS"; then
+            STATE=failure; REASON="labeled needs-review: a maintainer must REPLACE it with patch or minor; deleting it leaves this blocked"
+          elif ! grep -qxE 'patch|minor' <<< "$LABELS"; then
+            STATE=failure; REASON="no patch or minor label: the ABI check has not produced a verdict for this commit"
+          else
+            STATE=success; REASON="all pre-merge checks passed"
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f "state=${STATE}" -f "context=pre-merge/gate" -f "description=${REASON:0:140}" \
+            -f "target_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+          [[ "$STATE" == "success" ]] || { echo "::error::${REASON}"; exit 1; }
