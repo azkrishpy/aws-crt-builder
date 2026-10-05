@@ -1,13 +1,8 @@
 # check-abi
 
-Dump and compare the ABI of a CRT C shared library between a pull request's head
-and its base ref, and **label the PR** with the implied semver bump (`patch` if
-the ABI is backward-compatible, `minor` if it changed). This is intended for use
-with the CRT C libraries (ex: aws-c-s3, aws-c-io).
+Dump and compare the ABI of a CRT C shared library between a pull request's head and its base ref, and report the implied semver bump as the `label` output: `patch` if the ABI is backward-compatible, `minor` if it changed, `needs-review` if source compatibility broke. Applying that verdict to the pull request is the caller's job — see the `abi-label` action — so this one needs no token and writes nothing.
 
-This check is informational: a compatible or incompatible ABI both **succeed**
-and are surfaced as a label. The job fails **only** when abi-compliance-checker
-could not run (exit code ≥ 2), because then there is no trustworthy verdict.
+This check is informational: a compatible or incompatible ABI both **succeed** and are reported as a verdict. The job fails **only** when abi-compliance-checker could not run (exit code ≥ 2), because then there is no trustworthy verdict.
 
 ## What it does
 
@@ -30,17 +25,15 @@ action pulls that image and runs the whole check inside it:
       old name).
    5. **Publish report** — appends the verdict and the (sanitized) report body
       to the job summary.
-   6. **Choose the label** — `patch` (exit 0), `minor` (exit 1), or fail (exit ≥ 2).
-      The verdict escapes the container via a marker line on the container's
-      stdout (`ABI_LABEL_RESULT::<label>`), which the host greps out of the
-      captured `docker run` output — not a host-mounted file.
-3. **Label PR** — on the host (which has the PR context and token), add the
-   chosen label and remove the opposite one via `gh pr edit`.
+   6. **Choose the verdict** — `patch` (exit 0), `minor` (exit 1), or fail (exit ≥ 2).
+      It escapes the container via a marker line on the container's stdout
+      (`ABI_LABEL_RESULT::<label>`), which the host greps out of the captured
+      `docker run` output — not a host-mounted file — and exposes as the `label`
+      output.
 
 The in-container stages run as a single process because they chain state through
 `$GITHUB_ENV`, which does not survive across a `docker run` boundary
-(`scripts/abi_check.sh` is the orchestrator that bridges it). Labeling runs on
-the host because the container has neither the PR number nor a GitHub token.
+(`scripts/abi_check.sh` is the orchestrator that bridges it).
 
 ## Consumer requirements
 
@@ -50,9 +43,7 @@ The consumer workflow must, before invoking this action:
   `aws-actions/configure-aws-credentials`), so the image can be pulled.
 - **Checkout with `fetch-depth: 0`** so the base branch history is available for
   the worktree and `git merge-base`.
-- **Grant `pull-requests: write`** so the action can label the PR. Note: on PRs
-  from forks GitHub forces the token read-only regardless of this setting, so
-  labeling is skipped (the verdict is still in the job summary).
+- **No token is needed.** This action reads the repository and writes a verdict; the caller decides what to do with it.
 
 ## Scope and limitations
 
@@ -69,11 +60,12 @@ The consumer workflow must, before invoking this action:
   action targets today (none use submodules for their public API surface), but
   it means this action is **not** a drop-in fit for a repo like `aws-crt-cpp`
   that does use them, without further work.
-- **Default branch must be fetchable.** When triggered outside a
-  `pull_request` event (and `base-ref` isn't set), the base ref is resolved via
-  `git merge-base HEAD origin/<default-branch>`, taking the branch name from the
-  event payload and falling back to `main`. Check out with `fetch-depth: 0` so
-  it is reachable.
+- **Default branch must be reachable as `origin/main`.** When triggered outside
+  a `pull_request` event (and `base-ref` isn't set), the base ref is resolved
+  via `git merge-base HEAD origin/main`. A consumer repo whose default branch
+  isn't literally named `main` will hit a clear, actionable error (see
+  `scripts/build.sh`) rather than a silent misdetection, but this is a real
+  portability gap worth knowing about up front.
 - **Single-library scope.** Each run diffs one library's own ABI/API against
   its own previous version. It cannot detect a break that only manifests when
   a *different* library in the dependency graph is upgraded without a
@@ -95,7 +87,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       id-token: write        # for configure-aws-credentials OIDC
-      pull-requests: write   # to label the PR patch/minor
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -129,26 +120,20 @@ jobs:
 | `builder-host` | no | CloudFront URL | Builder artifact host. |
 | `image-registry` | no | CRT ECR registry | ECR registry hosting the ABI image. |
 | `image-name` | no | `aws-crt-ubuntu-22-abi-x64` | ABI docker image name. |
-| `github-token` | no | `github.token` | Token used to label the PR (needs `pull-requests: write`). |
-| `patch-label` | no | `patch` | Label applied when the ABI is backward-compatible. |
-| `minor-label` | no | `minor` | Label applied when the ABI changed but the API is source-compatible. |
-| `needs-review-label` | no | `needs-review` | Label applied when source (API) compatibility is broken. |
-| `base-ref` | no | _(none)_ | Explicit base ref to diff against (e.g. a previous release tag), overriding the PR base ref. Only for non-PR callers (e.g. a release workflow); leave unset in PR workflows so the PR gets labeled. |
+| `base-ref` | no | _(none)_ | Explicit base ref to diff against (e.g. a previous release tag), overriding the pull request base ref. Only for non-PR callers such as a release workflow; leave unset in a pull request workflow. |
 
-## The label
+## The verdict
 
-The label is not abicc's raw exit code -- it's a three-way verdict computed from
-each report's own structured fields (see `gate.sh`):
+The verdict is not abicc's raw exit code -- it is computed from each report's own structured fields (see `gate.sh`) and exposed as the `label` output:
 
-| Verdict | Meaning | Result |
+| `label` | Meaning | Result |
 |---------|---------|--------|
-| `patch` | ABI and API are both backward-compatible | job passes, PR labeled `patch` |
-| `minor` | ABI changed, but API (source) is still compatible | job passes, PR labeled `minor` |
-| `needs-review` | API (source) compatibility is broken -- callers fail to recompile | job passes, PR labeled `needs-review` |
-| _(none)_ | abi-compliance-checker could not produce a verdict (tool error) | **job fails**, no label |
+| `patch` | ABI and API are both backward-compatible | job passes |
+| `minor` | ABI changed, but API (source) is still compatible | job passes |
+| `needs-review` | API (source) compatibility is broken -- callers fail to recompile | job passes |
+| _(empty)_ | abi-compliance-checker could not produce a verdict (tool error) | **job fails** |
 
-The three labels are mutually exclusive: applying one removes the other two, so
-a re-run after a code change flips the label cleanly.
+What reaches the pull request is the caller's decision. The `abi-label` action reconciles the three labels to whichever verdict it is given, so exactly one is ever present and a re-run after a code change flips it cleanly.
 
 ### Blocking merges on `needs-review`
 
@@ -189,7 +174,7 @@ is built + pushed to ECR (tagged with the builder version) by the
 
 ```
 check-abi/
-├── action.yml          # pull image + docker run the orchestrator + label the PR
+├── action.yml          # pull image + docker run the orchestrator + expose the verdict
 ├── README.md
 └── scripts/
     ├── abi_check.sh    # in-container orchestrator (build->dump->compare->report->gate)
