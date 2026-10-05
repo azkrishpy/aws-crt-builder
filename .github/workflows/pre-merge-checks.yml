@@ -37,7 +37,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Clear the verdict
-        uses: awslabs/aws-crt-builder/.github/actions/validate-label@main
+        uses: azkrishpy/aws-crt-builder/.github/actions/validate-label@test/pm-live
         with:
           pr: ${{ github.event.pull_request.number }}
 
@@ -92,14 +92,14 @@ jobs:
 
       - name: Check ABI
         id: check
-        uses: awslabs/aws-crt-builder/.github/actions/check-abi@main
+        uses: azkrishpy/aws-crt-builder/.github/actions/check-abi@test/pm-live
         with:
           lib-name: ${{ inputs.lib-name }}
           builder-version: latest
           base-ref: ${{ steps.refs.outputs.base-sha }}
 
       - name: Apply the verdict
-        uses: awslabs/aws-crt-builder/.github/actions/validate-label@main
+        uses: azkrishpy/aws-crt-builder/.github/actions/validate-label@test/pm-live
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
