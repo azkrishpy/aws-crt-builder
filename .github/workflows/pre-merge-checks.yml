@@ -22,11 +22,6 @@ on:
         required: false
         type: string
         default: 'ubuntu-24.04'
-      builder-ref:
-        description: 'Ref of aws-crt-builder supplying the actions this workflow runs. A called workflow cannot discover its own ref -- github.job_workflow_sha is empty inside one and workflow_ref describes the caller -- so pin this to match whatever ref the caller pinned the workflow to.'
-        required: false
-        type: string
-        default: 'main'
     secrets:
       CRT_CI_ROLE_ARN:
         required: false
@@ -41,15 +36,8 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - name: Check out the actions this workflow runs
-        uses: actions/checkout@v4
-        with:
-          repository: awslabs/aws-crt-builder
-          ref: ${{ inputs.builder-ref }}
-          path: .crt-builder
-
       - name: Clear the verdict
-        uses: ./.crt-builder/.github/actions/validate-label
+        uses: awslabs/aws-crt-builder/.github/actions/validate-label@main
         with:
           pr: ${{ github.event.pull_request.number }}
 
@@ -102,23 +90,16 @@ jobs:
           git fetch --no-tags --quiet origin "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
           echo "base-sha=$(git merge-base HEAD "origin/${BASE_BRANCH}")" >> "$GITHUB_OUTPUT"
 
-      - name: Check out the actions this workflow runs
-        uses: actions/checkout@v4
-        with:
-          repository: awslabs/aws-crt-builder
-          ref: ${{ inputs.builder-ref }}
-          path: .crt-builder
-
       - name: Check ABI
         id: check
-        uses: ./.crt-builder/.github/actions/check-abi
+        uses: awslabs/aws-crt-builder/.github/actions/check-abi@main
         with:
           lib-name: ${{ inputs.lib-name }}
           builder-version: latest
           base-ref: ${{ steps.refs.outputs.base-sha }}
 
       - name: Apply the verdict
-        uses: ./.crt-builder/.github/actions/validate-label
+        uses: awslabs/aws-crt-builder/.github/actions/validate-label@main
         with:
           verdict: ${{ steps.check.outputs.label }}
           pr: ${{ github.event.pull_request.number }}
