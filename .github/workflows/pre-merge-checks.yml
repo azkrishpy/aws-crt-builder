@@ -1,6 +1,27 @@
 # Everything that must be true before a pull request merges, in one workflow.
 # Consumers call it from a single pull_request_target workflow; the branch ruleset
 # requires the `pre-merge/gate` commit status that the verdict job posts.
+#
+#   on:
+#     pull_request_target:
+#       # labeled/unlabeled re-run the gate when a maintainer swaps a label;
+#       # edited catches a retitle or a retarget.
+#       types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+#   concurrency:
+#     group: pre-merge-${{ github.event.pull_request.number }}
+#   jobs:
+#     pre-merge:
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#         id-token: write
+#         statuses: write
+#       uses: awslabs/aws-crt-builder/.github/workflows/pre-merge-checks.yml@main
+#       with:
+#         lib-name: aws-c-common
+#         approval-environment: ${{ github.event.pull_request.head.repo.full_name != github.repository && 'customer-env' || '' }}
+#       secrets:
+#         CRT_CI_ROLE_ARN: ${{ secrets.CRT_CI_ROLE_ARN }}
 name: Pre-merge checks
 
 on:
@@ -52,10 +73,22 @@ jobs:
         env:
           FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           ENVIRONMENT: ${{ inputs.approval-environment }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$FORK" == "true" && -z "$ENVIRONMENT" ]]; then
             echo "::error::a fork pull request reached this job with no approval environment; the caller must pass one."
             exit 1
+          fi
+          # GitHub creates a referenced environment that does not exist, with no
+          # protection rules, so a misspelled name would run fork code unreviewed.
+          if [[ -n "$ENVIRONMENT" ]]; then
+            REVIEWERS="$(gh api "repos/${GITHUB_REPOSITORY}/environments/${ENVIRONMENT}" \
+              -q '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' \
+              2>/dev/null)" || REVIEWERS=0
+            if [[ "${REVIEWERS:-0}" == "0" ]]; then
+              echo "::error::environment '${ENVIRONMENT}' has no required reviewers; create it with reviewers or fix the name the caller passes."
+              exit 1
+            fi
           fi
 
   # Diffs the merge base against the pull request head and labels the result.
