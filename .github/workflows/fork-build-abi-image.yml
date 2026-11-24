@@ -1,0 +1,32 @@
+# FORK ONLY (azkrishpy/aws-crt-builder): build the ABI image from this repo's
+# Dockerfile and push it to a personal ECR for fork CI experiments.
+name: Fork build ABI image
+
+on:
+  push:
+    branches: [pm/build-abi-image]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      REGISTRY: 750803918888.dkr.ecr.us-east-1.amazonaws.com
+      IMAGE: aws-crt-ubuntu-22-abi-x64
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.IMAGE_PUSH_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: actions/checkout@v4
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password | docker login -u AWS --password-stdin "$REGISTRY"
+          cp .github/docker-images/entrypoint.sh ".github/docker-images/${IMAGE#aws-crt-}/entrypoint.sh"
+          docker build -t "$REGISTRY/$IMAGE:latest" ".github/docker-images/${IMAGE#aws-crt-}"
+          docker push "$REGISTRY/$IMAGE:latest"
